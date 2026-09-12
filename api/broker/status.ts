@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { AlpacaNotConfiguredError, alpacaFetch, currentCredentialsSafe } from "../lib/alpaca";
+import { AlpacaNotConfiguredError, alpacaFetch, currentCredentialsSafe } from "../lib/alpaca.js";
 
 interface AlpacaAccount {
   status: string;

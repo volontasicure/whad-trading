@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { alpacaFetch } from "../lib/alpaca";
+import { alpacaFetch } from "../lib/alpaca.js";
 
 interface AlpacaClock {
   is_open: boolean;
