@@ -1,12 +1,17 @@
 name: Market tick
 
 # Scheduler esterno per api/cron/tick.ts: Vercel Cron gratuito gira al massimo una volta
-# al giorno, troppo poco per controllare i prezzi ogni pochi minuti durante il mercato.
+# al giorno, troppo poco per controllare i prezzi ogni minuto durante il mercato.
 # Finestra 13-21 UTC copre l'orario NYSE (9:30-16:00 ET) sia in EDT che in EST; la funzione
 # stessa verifica il market clock reale e non fa nulla fuori orario.
+#
+# Cadenza a 1 minuto: repo pubblico (minuti Actions illimitati sui runner standard), ma
+# GitHub esegue gli schedule "a impegno migliore" — sotto i 5 minuti alcune esecuzioni
+# possono slittare o saltare quando la coda è occupata. Non è garantito un tick esatto
+# ogni 60 secondi, è il massimo che GitHub Actions può onestamente offrire.
 on:
   schedule:
-    - cron: "*/10 13-21 * * 1-5"
+    - cron: "* 13-21 * * 1-5"
   workflow_dispatch: {}
 
 jobs:
