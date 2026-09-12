@@ -51,10 +51,11 @@ export async function alpacaFetch<T>(path: string, init?: RequestInit): Promise<
   return (await res.json()) as T;
 }
 
-/** Maschera una API key id mostrando solo gli ultimi 4 caratteri, come in "PK••••••••••7F2C". */
+/** Maschera una API key id mostrando prefisso e ultimi 4 caratteri, come in "PK••••••••••7F2C". */
 export function maskKeyId(keyId: string): string {
-  if (keyId.length <= 4) return "•".repeat(keyId.length);
-  return "•".repeat(keyId.length - 4) + keyId.slice(-4);
+  if (keyId.length <= 6) return "•".repeat(keyId.length);
+  const prefix = keyId.slice(0, 2);
+  return `${prefix}${"•".repeat(10)}${keyId.slice(-4)}`;
 }
 
 export function currentCredentialsSafe(): { environment: AlpacaEnvironment; maskedKey: string } | null {
