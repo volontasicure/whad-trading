@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { alpacaDataFetch } from "../../server/alpaca.js";
+import { alpacaDataFetch, alpacaFetch } from "../../server/alpaca.js";
 import { UNIVERSE_SYMBOLS } from "../../server/universe.js";
 import { decideLabEodCloses, type LabOpenRow } from "../../server/labEod.js";
 import {
@@ -86,6 +86,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const date = typeof req.query.date === "string" ? req.query.date : "2026-09-11";
   const warnings: string[] = [];
   const trades: Record<string, unknown>[] = [];
+
+  if (req.query.debugCalendar === "1") {
+    try {
+      const cal = await alpacaFetch(`/v2/calendar?start=${date}&end=${date}`);
+      res.status(200).json(cal);
+    } catch (err) {
+      res.status(502).json({ error: (err as Error).message });
+    }
+    return;
+  }
 
   try {
     const [dayBars, dailyBarsHistory] = await Promise.all([fetchDayBars(date), fetchDailyBarsBefore(date, 90)]);
