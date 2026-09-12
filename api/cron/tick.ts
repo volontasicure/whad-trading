@@ -24,8 +24,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (req.query.debugBars === "1") {
     try {
+      const start = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
       const data = await alpacaDataFetch(
-        "/v2/stocks/bars?symbols=AAPL,MSFT&timeframe=5Min&limit=5&feed=iex&sort=desc"
+        `/v2/stocks/bars?symbols=AAPL,MSFT&timeframe=5Min&limit=10&feed=iex&sort=desc&start=${encodeURIComponent(start)}`
       );
       res.status(200).json(data);
     } catch (err) {
