@@ -101,3 +101,5 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 4. Lot-matching per il realized P&L preciso (vedi limite noto sopra).
 5. `streamQuotes` via WebSocket Alpaca — richiede un servizio a lunga esecuzione separato, non funzioni serverless Vercel (il polling REST attuale ogni 20s è il sostituto pragmatico).
 6. Stati ancora da progettare: loading, disconnessione API, mercato chiuso, stop di portafoglio scattato, conferma mancante a mercato aperto. Chiedere prima di inventarli.
+7. **Allargare l'universo da 20 a 40 titoli**, bilanciato per settore (aiuta soprattutto il pairs trading, che oggi ha solo 2-3 titoli per settore). Deliberatamente rimandato a dopo il primo giorno live, per avere un confronto pulito e non invalidare il backtest già fatto.
+8. **Notizie/dati alternativi come filtro di rischio per strategia** (non per selezionare i titoli): distinguere breakout ORB genuini dal rumore, rilevare notizie che rompono una coppia nel pairs trading, evitare di tradare in reversione contro un movimento guidato da una notizia vera. Alpaca ha una News API già disponibile sullo stesso account. Rimandato allo stesso modo del punto 7.
