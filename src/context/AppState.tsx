@@ -1,10 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { LiveMarketData, PnlMode } from "../data/mockData";
-import { FALLBACK_LIVE_MARKET_DATA, SESSION_RULES, buildLiveMarketData } from "../data/mockData";
+import type { LiveMarketData, PnlMode, RealLabOverrides } from "../data/mockData";
+import { FALLBACK_LIVE_MARKET_DATA, SESSION_RULES, buildLiveMarketData, mergeRealLabData } from "../data/mockData";
 import { fetchLiveQuotes } from "../lib/marketQuotes";
+import { fetchLabPositions } from "../lib/labPositions";
 
 const PNL_MODE_KEY = "whad.pnlMode";
 const QUOTES_POLL_MS = 20_000;
+const LAB_POSITIONS_POLL_MS = 20_000;
 
 export type MarketDataSource = "loading" | "live" | "mock";
 
@@ -19,6 +21,8 @@ interface AppStateValue {
   autoConfirm: boolean;
   liveMarket: LiveMarketData;
   marketSource: MarketDataSource;
+  /** Strategie con posizioni reali (lab_positions) attualmente disponibili — vuoto finché nessun tick ha girato. */
+  realLabStrategies: RealLabOverrides;
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);
@@ -32,9 +36,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [confirmed, setConfirmed] = useState(false);
   const [confirmedAt, setConfirmedAt] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
-  const [liveMarket, setLiveMarket] = useState<LiveMarketData>(FALLBACK_LIVE_MARKET_DATA);
+  const [quoteMarket, setQuoteMarket] = useState<LiveMarketData>(FALLBACK_LIVE_MARKET_DATA);
   const [marketSource, setMarketSource] = useState<MarketDataSource>("loading");
+  const [realLabData, setRealLabData] = useState<RealLabOverrides>({});
   const cancelledRef = useRef(false);
+  const labCancelledRef = useRef(false);
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
@@ -53,7 +59,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           setMarketSource((s) => (s === "loading" ? "mock" : s));
           return;
         }
-        setLiveMarket(buildLiveMarketData(quotes));
+        setQuoteMarket(buildLiveMarketData(quotes));
         setMarketSource("live");
       } catch {
         if (cancelledRef.current) return;
@@ -68,6 +74,29 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       clearInterval(id);
     };
   }, []);
+
+  useEffect(() => {
+    labCancelledRef.current = false;
+
+    const poll = async () => {
+      try {
+        const real = await fetchLabPositions();
+        if (labCancelledRef.current) return;
+        setRealLabData(real);
+      } catch {
+        // Endpoint non disponibile (dev senza vercel dev, o nessun tick ha ancora girato): resta sulla simulazione.
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, LAB_POSITIONS_POLL_MS);
+    return () => {
+      labCancelledRef.current = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  const liveMarket = useMemo(() => mergeRealLabData(quoteMarket, realLabData), [quoteMarket, realLabData]);
 
   const setPnlMode = (mode: PnlMode) => {
     setPnlModeState(mode);
@@ -97,8 +126,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       autoConfirm: SESSION_RULES.autoConfirm,
       liveMarket,
       marketSource,
+      realLabStrategies: realLabData,
     }),
-    [pnlMode, confirmed, confirmedAt, now, liveMarket, marketSource]
+    [pnlMode, confirmed, confirmedAt, now, liveMarket, marketSource, realLabData]
   );
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;

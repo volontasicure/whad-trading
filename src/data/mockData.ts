@@ -486,3 +486,67 @@ export function buildLiveMarketData(liveQuotes: Record<string, { price: number; 
   const positionsToClose = buildPositionsToClose(book);
   return { market, book, strategySums, equityCurves, todayRank, positionsToClose };
 }
+
+// --- Posizioni reali dei laboratori (lab_positions), quando disponibili ---
+
+export interface RealLabPosition {
+  symbol: string;
+  side: Side;
+  qty: number;
+  entryPrice: number;
+}
+
+export interface RealLabStrategyData {
+  openPositions: RealLabPosition[];
+  realizedToday: number;
+}
+
+/** Una voce per strategia con dati reali (id = "orb" | "pairs" | "vwap_reversion"); assente = ancora simulata. */
+export type RealLabOverrides = Partial<Record<StrategyId, RealLabStrategyData>>;
+
+/**
+ * Sostituisce, per le sole strategie con dati reali, le celle simulate del libro con le
+ * posizioni vere da `lab_positions` (unrealized ricalcolato sul prezzo live corrente).
+ * Le strategie senza dati reali restano invariate (simulazione). Il "realized" per
+ * simbolo non è tracciato lato server per le strategie reali (solo l'aggregato lo è),
+ * quindi qui resta a zero/"—" — l'aggregato corretto va preso da RealLabStrategyData.realizedToday.
+ */
+export function applyRealLabData(book: BookRow[], realData: RealLabOverrides): BookRow[] {
+  if (Object.keys(realData).length === 0) return book;
+  return book.map((row) => {
+    const cells = row.cells.map((cell, idx) => {
+      const real = realData[STRATEGIES[idx].id];
+      if (!real) return cell;
+      const pos = real.openPositions.find((p) => p.symbol === row.symbol);
+      if (!pos) return { side: "FLAT" as Side, qty: cell.qty, avg: row.price, last: row.price, unreal: 0, real: 0 };
+      const dir = pos.side === "SHORT" ? -1 : 1;
+      const unreal = Math.round(dir * pos.qty * (row.price - pos.entryPrice));
+      return { side: pos.side, qty: pos.qty, avg: pos.entryPrice, last: row.price, unreal, real: 0 };
+    });
+    return { ...row, cells };
+  });
+}
+
+/** Ricalcola gli aggregati per strategia dal libro (eventualmente già corretto da applyRealLabData). */
+export function applyRealStrategySums(
+  book: BookRow[],
+  realData: RealLabOverrides
+): { unrealized: number; realized: number }[] {
+  return STRATEGIES.map((s, i) => {
+    const real = realData[s.id];
+    const unrealized = book.reduce((acc, row) => acc + row.cells[i].unreal, 0);
+    if (!real) return buildStrategySums(book)[i];
+    return { unrealized, realized: real.realizedToday };
+  });
+}
+
+/** Combina un LiveMarketData (prezzi live) con le posizioni reali dei lab, dove disponibili. */
+export function mergeRealLabData(data: LiveMarketData, realData: RealLabOverrides): LiveMarketData {
+  if (Object.keys(realData).length === 0) return data;
+  const book = applyRealLabData(data.book, realData);
+  const strategySums = applyRealStrategySums(book, realData);
+  const equityCurves = buildEquityCurves(strategySums);
+  const todayRank = buildTodayRank(strategySums);
+  const positionsToClose = buildPositionsToClose(book);
+  return { ...data, book, strategySums, equityCurves, todayRank, positionsToClose };
+}
