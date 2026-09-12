@@ -4,7 +4,9 @@ Piattaforma **WHAD Trading**: tre strategie eseguite in parallelo su tre portafo
 
 ## Stato attuale
 
-Frontend React + Vite + TypeScript con le 6 viste ricostruite fedelmente dal design handoff, dati **finti e deterministici** (stessa logica del prototipo `.dc.html`). Nessun backend/broker reale collegato ancora.
+Frontend React + Vite + TypeScript con le 6 viste ricostruite fedelmente dal design handoff, dati **finti e deterministici** (stessa logica del prototipo `.dc.html`).
+
+Adapter broker Alpaca (Trading API, non Broker API — vedi sotto) collegato in sola lettura per il **conto reale**: stato connessione, posizioni, market clock. Le funzioni serverless in `api/broker/` tengono le chiavi lato server; il frontend non le vede mai. Le 3 card "Portafoglio laboratorio" restano dati finti.
 
 ## Riferimenti di design
 
@@ -16,12 +18,23 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 
 ## Struttura del codice
 
-- `src/types.ts` — interfacce del modello dati (da `API.md`).
+- `src/types.ts` — interfacce del modello dati e contratto `BrokerAdapter` (da `API.md`).
 - `src/data/mockData.ts` — dati finti deterministici (stessa logica hash del prototipo) + helper di formattazione (`money`, `dec`, `pnlColor`, `formatPnl`).
 - `src/context/AppState.tsx` — stato condiviso: toggle Valore/%, conferma debriefing, countdown.
 - `src/components/` — Sidebar, Header, TickerTape, Sparkline, PnlHistogram, PnlModeToggle.
 - `src/views/` — una vista per file: `LabView`, `StrategyView`, `DebriefView`, `LiveView`, `HistoryView`, `RulesView`.
+- `src/lib/brokerAdapters/alpaca.ts` — implementazione client di `BrokerAdapter`, chiama solo `/api/broker/*` (mai Alpaca direttamente dal browser).
+- `src/hooks/useAlpacaStatus.ts` — legge lo stato reale del broker con fallback silenzioso ai dati finti se le chiavi non sono configurate.
+- `api/broker/*.ts` — funzioni serverless Vercel che parlano con la Trading API di Alpaca usando le chiavi lato server (`api/lib/alpaca.ts`).
 - Routing reale con `react-router-dom`: `/lab`, `/strategie/:id`, `/debriefing`, `/reale`, `/storico`, `/regole`.
+
+### Adapter broker: cosa fa e cosa no
+
+- **Alpaca Trading API**, non Broker API: un solo conto (il "conto reale"), niente onboarding di conti terzi. I 3 portafogli laboratorio restano simulati internamente — Alpaca non è pensato per più conti paralleli sotto le stesse chiavi.
+- Implementato (sola lettura + scrittura non ancora collegata alla UI): `status`, `getPositions`, `marketClock`, `getExecutions`, `getRealizedPnl`, `submitOrder`, `closePosition`.
+- **Limite noto**: `getRealizedPnl` usa la portfolio history di Alpaca (variazione di equity = realized + unrealized), non il solo realized "incassato" richiesto dalla spec — Alpaca non espone il realized per singolo fill via REST senza lot-matching. Da rifinire quando servirà precisione contabile.
+- **Non implementato**: `streamQuotes` (richiede una connessione persistente, incompatibile con le funzioni serverless Vercel — serve un servizio a lunga esecuzione separato, vedi sotto).
+- Variabili d'ambiente richieste (solo server-side, mai `VITE_*`): `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, `ALPACA_ENV` (`paper`/`live`). Vedi `.env.example`.
 
 ## Regole di dominio da non violare
 
@@ -43,7 +56,7 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 
 ## Prossimi passi
 
-1. Adapter broker dietro interfaccia (`BrokerAdapter` in `API.md`), con Alpaca come prima implementazione (paper account).
-2. Sostituire `src/data/mockData.ts` con chiamate reali (REST + WebSocket per il ticker), mantenendo intatte le interfacce in `src/types.ts`.
-3. Stati ancora da progettare: loading, disconnessione API, mercato chiuso, stop di portafoglio scattato, conferma mancante a mercato aperto. Chiedere prima di inventarli.
-4. Deploy: frontend su Vercel; il backend/adapter broker (streaming continuo, job schedulati) va su un servizio a lunga esecuzione separato, non su funzioni serverless Vercel.
+1. Sostituire il resto di `src/data/mockData.ts` (posizioni, ticker) con chiamate reali man mano che serve, mantenendo intatte le interfacce in `src/types.ts`.
+2. Lot-matching per il realized P&L preciso (vedi limite noto sopra).
+3. Servizio a lunga esecuzione separato (non Vercel serverless) per: `streamQuotes` via WebSocket Alpaca, e i job schedulati (pre-apertura, chiusura EOD, debriefing serale).
+4. Stati ancora da progettare: loading, disconnessione API, mercato chiuso, stop di portafoglio scattato, conferma mancante a mercato aperto. Chiedere prima di inventarli.

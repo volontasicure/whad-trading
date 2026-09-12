@@ -128,6 +128,32 @@ export interface BrokerStatus {
   id: string;
   displayName: string;
   connected: boolean;
-  environment: "paper" | "live";
+  environment: "paper" | "live" | null;
   maskedKey: string;
+}
+
+export interface OrderRequest {
+  symbol: string;
+  side: "buy" | "sell";
+  qty: number;
+  type: "market" | "limit";
+  limitPrice?: number;
+}
+
+/**
+ * Un'unica interfaccia, una implementazione per broker (Alpaca prima, poi IBKR/Binance).
+ * La UI non deve mai importare un SDK di broker. Vedi API.md per il contratto originale.
+ */
+export interface BrokerAdapter {
+  id: string;
+  displayName: string;
+  status(): Promise<BrokerStatus>;
+  getPositions(portfolioId: string): Promise<Position[]>;
+  getRealizedPnl(portfolioId: string, period: "day" | "week" | "month" | "inception"): Promise<number>;
+  getExecutions(portfolioId: string, since: string): Promise<Execution[]>;
+  submitOrder(o: OrderRequest): Promise<{ orderId: string }>;
+  closePosition(symbol: string): Promise<{ orderId: string }>;
+  /** Ritorna una funzione di unsubscribe. */
+  streamQuotes(symbols: string[], cb: (q: Quote) => void): () => void;
+  marketClock(): Promise<{ isOpen: boolean; nextClose: string; nextOpen: string }>;
 }

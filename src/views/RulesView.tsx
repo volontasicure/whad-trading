@@ -1,10 +1,13 @@
 import { Header } from "../components/Header";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
+import { useAlpacaStatus } from "../hooks/useAlpacaStatus";
 import { BROKERS, CAPITAL, MARKET, SESSION_RULES } from "../data/mockData";
 
 export function RulesView() {
   const { eodAutoClose, autoConfirm } = useAppState();
+  const { data: alpacaStatus } = useAlpacaStatus();
+  const brokers = BROKERS.map((b) => (b.id === "alpaca" ? alpacaStatus : b));
 
   const eodRules = [
     {
@@ -88,7 +91,7 @@ export function RulesView() {
           <div style={{ padding: "15px 18px", borderBottom: "1px solid var(--border-divider)", fontSize: 15, fontWeight: 500 }}>
             Broker collegati
           </div>
-          {BROKERS.map((b) => (
+          {brokers.map((b) => (
             <div key={b.id} style={{ padding: "14px 18px", borderBottom: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
               <div
                 className="mono"
