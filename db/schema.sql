@@ -12,10 +12,15 @@ CREATE TABLE IF NOT EXISTS lab_positions (
   exit_price NUMERIC,
   exit_time TIMESTAMPTZ,
   realized_pnl NUMERIC,
-  status TEXT NOT NULL DEFAULT 'open'
+  status TEXT NOT NULL DEFAULT 'open',
+  -- Collega le due gambe di una coppia (solo strategy_id = 'pairs'); NULL per le altre strategie.
+  pair_key TEXT
 );
 
+ALTER TABLE lab_positions ADD COLUMN IF NOT EXISTS pair_key TEXT;
+
 CREATE INDEX IF NOT EXISTS lab_positions_strategy_status_idx ON lab_positions (strategy_id, status);
+CREATE INDEX IF NOT EXISTS lab_positions_pair_key_idx ON lab_positions (pair_key) WHERE pair_key IS NOT NULL;
 
 -- Stato di lavoro intraday per strategia (range di apertura, VWAP accumulato, coppie selezionate, ecc.).
 CREATE TABLE IF NOT EXISTS lab_state (
