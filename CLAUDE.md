@@ -4,9 +4,13 @@ Piattaforma **WHAD Trading**: tre strategie eseguite in parallelo su tre portafo
 
 ## Stato attuale
 
-Frontend React + Vite + TypeScript con le 6 viste ricostruite fedelmente dal design handoff, dati **finti e deterministici** (stessa logica del prototipo `.dc.html`).
+Frontend React + Vite + TypeScript con le 6 viste ricostruite fedelmente dal design handoff.
 
-Adapter broker Alpaca (Trading API, non Broker API — vedi sotto) collegato in sola lettura per il **conto reale**: stato connessione, posizioni, market clock. Le funzioni serverless in `api/broker/` tengono le chiavi lato server; il frontend non le vede mai. Le 3 card "Portafoglio laboratorio" restano dati finti.
+**Dati reali**: prezzi di mercato (`/api/market/quotes`, pollati ogni 20s) e conto reale (posizioni, P&L per periodo, esecuzioni via `useRealPortfolio`). I 3 laboratori restano **simulati** con la stessa logica deterministica del prototipo, ma ora girano sui prezzi reali invece che su uno snapshot fisso — non esiste ancora una logica di trading vera (ORB/pairs/VWAP reversion), quindi le posizioni "lab" non riflettono decisioni reali. Storico sedute, backtest e P&L per periodo dei lab restano dati finti (nessuna persistenza ancora).
+
+**Nessuna scrittura automatica verso il broker**: "Conferma e attiva" nel debriefing aggiorna solo lo stato locale della UI, non chiama `submitOrder`. Deliberato: finché non esiste una logica di strategia reale, collegare l'invio ordini userebbe segnali finti spacciandoli per un algoritmo funzionante — vedi "Prossimi passi".
+
+**Automazione**: chiusura EOD reale via Vercel Cron (`api/cron/eod-close.ts`, schedulato in `vercel.json`) — chiude le posizioni reali con unrealized positivo a ridosso della chiusura di mercato. Nessun altro job schedulato esiste ancora (debriefing serale, allineamento lab).
 
 ## Riferimenti di design
 
@@ -24,8 +28,13 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 - `src/components/` — Sidebar, Header, TickerTape, Sparkline, PnlHistogram, PnlModeToggle.
 - `src/views/` — una vista per file: `LabView`, `StrategyView`, `DebriefView`, `LiveView`, `HistoryView`, `RulesView`.
 - `src/lib/brokerAdapters/alpaca.ts` — implementazione client di `BrokerAdapter`, chiama solo `/api/broker/*` (mai Alpaca direttamente dal browser).
-- `src/hooks/useAlpacaStatus.ts` — legge lo stato reale del broker con fallback silenzioso ai dati finti se le chiavi non sono configurate.
+- `src/lib/marketQuotes.ts` — fetch delle quotazioni reali (`/api/market/quotes`).
+- `src/hooks/useAlpacaStatus.ts` — stato del broker, fallback silenzioso ai dati finti.
+- `src/hooks/useRealPortfolio.ts` — posizioni/P&L/esecuzioni reali del conto Alpaca, fallback silenzioso ai dati finti.
+- `src/context/AppState.tsx` — oltre allo stato UI, polla `/api/market/quotes` ogni 20s ed espone `liveMarket` (ricalcolato con `buildLiveMarketData` in `mockData.ts`) a tutte le viste.
 - `api/broker/*.ts` — funzioni serverless Vercel che parlano con la Trading API di Alpaca usando le chiavi lato server (`api/lib/alpaca.ts`).
+- `api/market/quotes.ts` — legge gli snapshot reali dalla Market Data API di Alpaca (`api/lib/alpaca.ts` → `alpacaDataFetch`, host `data.alpaca.markets`, separato dalla Trading API).
+- `api/cron/eod-close.ts` — chiusura EOD reale, schedulata via Vercel Cron in `vercel.json`. Protetta da `CRON_SECRET` (Vercel la invia da sola come header `Authorization: Bearer` quando la variabile è impostata).
 - Routing reale con `react-router-dom`: `/lab`, `/strategie/:id`, `/debriefing`, `/reale`, `/storico`, `/regole`.
 
 ### Adapter broker: cosa fa e cosa no
@@ -34,7 +43,11 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 - Implementato (sola lettura + scrittura non ancora collegata alla UI): `status`, `getPositions`, `marketClock`, `getExecutions`, `getRealizedPnl`, `submitOrder`, `closePosition`.
 - **Limite noto**: `getRealizedPnl` usa la portfolio history di Alpaca (variazione di equity = realized + unrealized), non il solo realized "incassato" richiesto dalla spec — Alpaca non espone il realized per singolo fill via REST senza lot-matching. Da rifinire quando servirà precisione contabile.
 - **Non implementato**: `streamQuotes` (richiede una connessione persistente, incompatibile con le funzioni serverless Vercel — serve un servizio a lunga esecuzione separato, vedi sotto).
-- Variabili d'ambiente richieste (solo server-side, mai `VITE_*`): `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, `ALPACA_ENV` (`paper`/`live`). Vedi `.env.example`.
+- Variabili d'ambiente richieste (solo server-side, mai `VITE_*`): `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, `ALPACA_ENV` (`paper`/`live`), `CRON_SECRET` (per `api/cron/*`). Vedi `.env.example`.
+
+### Cron EOD: limite noto sull'ora legale
+
+`api/cron/eod-close.ts` gira una volta al giorno via Vercel Cron (piano Hobby: un solo orario UTC fisso, niente cron più frequenti). La chiusura NYSE (16:00 ET) cade a un'ora UTC diversa secondo l'ora legale USA (20:00 UTC in EDT, marzo-novembre; 21:00 UTC in EST, novembre-marzo). Lo schedule è tarato su EDT: nei mesi EST il mercato risulterà già chiuso quando il cron parte e la chiusura verrà saltata (la funzione verifica sempre `marketClock()` reale prima di agire, quindi salta in sicurezza invece di chiudere posizioni all'orario sbagliato). Per coprire entrambi i periodi servirebbe un cron più frequente (piano Pro) o uno scheduler timezone-aware esterno.
 
 ## Regole di dominio da non violare
 
@@ -56,7 +69,9 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 
 ## Prossimi passi
 
-1. Sostituire il resto di `src/data/mockData.ts` (posizioni, ticker) con chiamate reali man mano che serve, mantenendo intatte le interfacce in `src/types.ts`.
-2. Lot-matching per il realized P&L preciso (vedi limite noto sopra).
-3. Servizio a lunga esecuzione separato (non Vercel serverless) per: `streamQuotes` via WebSocket Alpaca, e i job schedulati (pre-apertura, chiusura EOD, debriefing serale).
-4. Stati ancora da progettare: loading, disconnessione API, mercato chiuso, stop di portafoglio scattato, conferma mancante a mercato aperto. Chiedere prima di inventarli.
+1. **Logica reale delle 3 strategie** (ORB, pairs trading, VWAP reversion) — il pezzo più grosso rimasto. Richiede: dati storici intraday (barre a 1 min da Alpaca), un motore di decisione che gira periodicamente durante l'orario di mercato, e soprattutto **una persistenza** (database) per tracciare lo stato di ogni lab tra un'esecuzione e l'altra delle funzioni serverless — che sono stateless. Da scegliere prima di scrivere la logica: dove vive questo stato (Vercel Postgres/KV, Supabase, altro).
+2. Una volta che i lab hanno segnali reali: collegare "Conferma e attiva" a `submitOrder` per davvero, con conferma asincrona e stato di errore (oggi non progettato).
+3. Debriefing serale automatico (job schedulato che consolida lo storico a 20 sedute) — dipende anch'esso dalla persistenza del punto 1.
+4. Lot-matching per il realized P&L preciso (vedi limite noto sopra).
+5. `streamQuotes` via WebSocket Alpaca — richiede un servizio a lunga esecuzione separato, non funzioni serverless Vercel (il polling REST attuale ogni 20s è il sostituto pragmatico).
+6. Stati ancora da progettare: loading, disconnessione API, mercato chiuso, stop di portafoglio scattato, conferma mancante a mercato aperto. Chiedere prima di inventarli.
