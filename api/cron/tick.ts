@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { alpacaFetch } from "../../server/alpaca.js";
+import { alpacaDataFetch, alpacaFetch } from "../../server/alpaca.js";
 import { db } from "../../server/db.js";
 
 interface AlpacaClock {
@@ -19,6 +19,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const auth = req.headers.authorization;
   if (!process.env.TICK_SECRET || auth !== `Bearer ${process.env.TICK_SECRET}`) {
     res.status(401).json({ error: "Non autorizzato" });
+    return;
+  }
+
+  if (req.query.debugBars === "1") {
+    try {
+      const data = await alpacaDataFetch(
+        "/v2/stocks/bars?symbols=AAPL,MSFT&timeframe=5Min&limit=5&feed=iex&sort=desc"
+      );
+      res.status(200).json(data);
+    } catch (err) {
+      res.status(502).json({ error: (err as Error).message });
+    }
     return;
   }
 
