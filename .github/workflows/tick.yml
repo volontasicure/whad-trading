@@ -5,13 +5,13 @@ name: Market tick
 # Finestra 13-21 UTC copre l'orario NYSE (9:30-16:00 ET) sia in EDT che in EST; la funzione
 # stessa verifica il market clock reale e non fa nulla fuori orario.
 #
-# Cadenza a 1 minuto: repo pubblico (minuti Actions illimitati sui runner standard), ma
-# GitHub esegue gli schedule "a impegno migliore" — sotto i 5 minuti alcune esecuzioni
-# possono slittare o saltare quando la coda è occupata. Non è garantito un tick esatto
-# ogni 60 secondi, è il massimo che GitHub Actions può onestamente offrire.
+# Cadenza a 5 minuti: coincide con la granularità delle barre usate per RSI/VWAP (sotto i
+# 5 minuti non c'è comunque nuova informazione dai dati), ed è la soglia sotto la quale
+# GitHub esegue gli schedule "a impegno migliore" (esecuzioni che possono slittare o
+# saltare). Repo pubblico = minuti Actions illimitati, quindi nessun vincolo di costo qui.
 on:
   schedule:
-    - cron: "* 13-21 * * 1-5"
+    - cron: "*/5 13-21 * * 1-5"
   workflow_dispatch: {}
 
 jobs:
