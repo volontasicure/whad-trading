@@ -7,3 +7,6 @@ dev.bat
 !.vscode/extensions.json
 .env
 .env.local
+
+.vercel
+.env*
