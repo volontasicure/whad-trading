@@ -5,22 +5,19 @@ import { Sparkline } from "../components/Sparkline";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
 import {
-  BOOK,
-  EQUITY_CURVES,
-  POSITIONS_TO_CLOSE,
   STRATEGIES,
-  STRATEGY_SUMS,
-  TODAY_RANK,
   dec,
   formatPnl,
   money,
   pnlColor,
   periodPnlFor,
+  type BookRow,
 } from "../data/mockData";
 
 export function LabView() {
   const navigate = useNavigate();
-  const { pnlMode, eodAutoClose } = useAppState();
+  const { pnlMode, eodAutoClose, liveMarket } = useAppState();
+  const { book, strategySums, equityCurves, todayRank, positionsToClose } = liveMarket;
 
   return (
     <>
@@ -29,8 +26,8 @@ export function LabView() {
       <div style={{ padding: "22px 30px 40px", display: "flex", flexDirection: "column", gap: 20 }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(290px, 1fr))", gap: 14 }}>
           {STRATEGIES.map((s, i) => {
-            const sum = STRATEGY_SUMS[i];
-            const rank = TODAY_RANK[i];
+            const sum = strategySums[i];
+            const rank = todayRank[i];
             const net = sum.unrealized + sum.realized;
             return (
               <div key={s.id} className="card" style={{ padding: "16px 16px 14px", display: "flex", flexDirection: "column", gap: 14 }}>
@@ -59,7 +56,7 @@ export function LabView() {
                 </div>
 
                 <div style={{ height: 46, margin: "0 -4px" }}>
-                  <Sparkline values={EQUITY_CURVES[i]} color={net >= 0 ? "var(--green-ink)" : "var(--red-ink)"} />
+                  <Sparkline values={equityCurves[i]} color={net >= 0 ? "var(--green-ink)" : "var(--red-ink)"} />
                 </div>
 
                 <div
@@ -164,11 +161,11 @@ export function LabView() {
               whiteSpace: "nowrap",
             }}
           >
-            {POSITIONS_TO_CLOSE} da chiudere
+            {positionsToClose} da chiudere
           </div>
         </div>
 
-        <CompositionTable />
+        <CompositionTable book={book} totals={strategySums} />
       </div>
     </>
   );
@@ -249,8 +246,13 @@ function PnlRow({
   );
 }
 
-function CompositionTable() {
-  const totals = STRATEGY_SUMS;
+function CompositionTable({
+  book,
+  totals,
+}: {
+  book: BookRow[];
+  totals: { unrealized: number; realized: number }[];
+}) {
   return (
     <div className="card no-scrollbar-x" style={{ overflow: "hidden" }}>
       <div
@@ -305,7 +307,7 @@ function CompositionTable() {
         ))}
       </div>
 
-      {BOOK.map((row) => (
+      {book.map((row) => (
         <div
           key={row.symbol}
           className="row-hover"

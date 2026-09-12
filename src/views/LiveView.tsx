@@ -2,10 +2,10 @@ import { Header } from "../components/Header";
 import { PnlModeToggle } from "../components/PnlModeToggle";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
+import { useRealPortfolio } from "../hooks/useRealPortfolio";
 import {
   BEST_STRATEGY_INDEX,
-  EXECUTIONS,
-  REAL_PORTFOLIO,
+  CAPITAL,
   STRATEGIES,
   dec,
   formatPnl,
@@ -15,11 +15,14 @@ import {
 } from "../data/mockData";
 
 export function LiveView() {
-  const { pnlMode, eodAutoClose, confirmedAt } = useAppState();
+  const { pnlMode, eodAutoClose, confirmedAt, liveMarket } = useAppState();
+  const { data: real } = useRealPortfolio();
   const best = STRATEGIES[BEST_STRATEGY_INDEX];
-  const realPnl = periodPnlFor("real");
   const labPnl = periodPnlFor(best.code.toLowerCase().replace(" ", "-"));
-  const openPositions = REAL_PORTFOLIO.positions.slice(0, 8);
+  const openPositions = real.positions.slice(0, 8);
+  const labToday = liveMarket.strategySums[BEST_STRATEGY_INDEX];
+  const labTodayNet = labToday.unrealized + labToday.realized;
+  const deviationPct = ((real.realizedToday - labTodayNet) / CAPITAL) * 100;
 
   return (
     <>
@@ -39,18 +42,18 @@ export function LiveView() {
               Confermata alle {confirmedAt ?? "15:31"} · Alpaca · conto reale
             </div>
           </div>
-          <Kpi label="REALIZED OGGI" value={money(REAL_PORTFOLIO.realizedToday)} color={pnlColor(REAL_PORTFOLIO.realizedToday)} sub={`${REAL_PORTFOLIO.trades} operazioni chiuse`} />
+          <Kpi label="REALIZED OGGI" value={money(real.realizedToday)} color={pnlColor(real.realizedToday)} sub={`${real.executions.length} esecuzioni oggi`} />
           <Kpi
             label="UNREALIZED"
-            value={money(REAL_PORTFOLIO.unrealized)}
-            color={pnlColor(REAL_PORTFOLIO.unrealized)}
+            value={money(real.unrealized)}
+            color={pnlColor(real.unrealized)}
             sub={`${openPositions.length} posizioni aperte`}
           />
           <Kpi
             label="SCOSTAMENTO DA LAB"
-            value={`${dec(REAL_PORTFOLIO.deviationFromLabPct ?? 0, 1).replace("-", "−")}%`}
+            value={`${dec(deviationPct, 1).replace("-", "−")}%`}
             color="var(--text-secondary)"
-            sub={`slippage e commissioni: −${REAL_PORTFOLIO.costs} $`}
+            sub={`lab ${best.code}: ${money(labTodayNet)} $ oggi`}
           />
         </div>
 
@@ -76,10 +79,10 @@ export function LiveView() {
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
-            <PeriodCell label="ULTIMA GIORNATA" value={realPnl.lastSession} sub="seduta dell'11 set, chiusa" pnlMode={pnlMode} />
-            <PeriodCell label="SETTIMANA PREC." value={realPnl.previousWeek} sub="5 sedute" pnlMode={pnlMode} />
-            <PeriodCell label="MESE PREC." value={realPnl.previousMonth} sub="21 sedute" pnlMode={pnlMode} />
-            <PeriodCell label="DA INIZIO" value={realPnl.sinceInception} sub="dal 3 mar 2026" pnlMode={pnlMode} />
+            <PeriodCell label="ULTIMA GIORNATA" value={real.periodPnl.lastSession} sub="seduta odierna" pnlMode={pnlMode} />
+            <PeriodCell label="SETTIMANA PREC." value={real.periodPnl.previousWeek} sub="ultimi 7 giorni" pnlMode={pnlMode} />
+            <PeriodCell label="MESE PREC." value={real.periodPnl.previousMonth} sub="ultimi 30 giorni" pnlMode={pnlMode} />
+            <PeriodCell label="DA INIZIO" value={real.periodPnl.sinceInception} sub={`dal ${real.periodPnl.inceptionDate}`} pnlMode={pnlMode} />
           </div>
 
           <div style={{ borderTop: "1px solid var(--border-divider)", background: "var(--bg-subtle)" }}>
@@ -184,7 +187,7 @@ export function LiveView() {
               <div style={{ fontSize: 15, fontWeight: 500 }}>Esecuzioni</div>
               <div className="dot dot-live" />
             </div>
-            {EXECUTIONS.map((f, i) => (
+            {real.executions.map((f, i) => (
               <div key={i} style={{ padding: "11px 18px", borderBottom: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", gap: 10 }}>
                 <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", whiteSpace: "nowrap" }}>{f.ts}</div>
                 <span className={`chip ${f.action === "BUY" ? "chip-long" : "chip-short"}`}>{f.action}</span>

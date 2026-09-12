@@ -53,14 +53,19 @@ function hash(s: string): number {
   return ((h >>> 0) % 10000) / 10000;
 }
 
-interface MarketRow {
+export interface MarketRow {
   symbol: string;
   name: string;
   price: number;
   changePct: number;
 }
 
-/** Prezzo corrente e variazione % di giornata — verità di mercato condivisa da lab e conto reale. */
+/**
+ * Prezzo e variazione % di fallback — usati quando le quotazioni reali di Alpaca
+ * non sono disponibili (chiavi non configurate, fetch fallito). L'universo di
+ * simboli/nomi qui definito resta fisso: solo prezzo/variazione vengono
+ * sovrascritti con dati reali in `buildLiveMarketData`.
+ */
 export const MARKET: MarketRow[] = [
   { symbol: "AAPL", name: "Apple", price: 234.34, changePct: 1.24 },
   { symbol: "MSFT", name: "Microsoft", price: 418.75, changePct: 0.62 },
@@ -168,7 +173,7 @@ export const STRATEGIES: Strategy[] = [
   },
 ];
 
-/** P&L realized per periodo — laboratorio, costi dedotti. */
+/** P&L realized per periodo — laboratorio, costi dedotti. Storico multi-giorno: non dipende dal prezzo live di oggi. */
 const PNL: Record<Strategy["code"], { d: number; w: number; m: number; a: number }> = {
   "LAB A": { d: 980, w: 4120, m: 9640, a: 21480 },
   "LAB B": { d: 640, w: 2980, m: 7240, a: 16320 },
@@ -177,16 +182,19 @@ const PNL: Record<Strategy["code"], { d: number; w: number; m: number; a: number
 const PNL_REAL = { d: 1240, w: 6360, m: 12290, a: 24870 };
 const INCEPTION_DATE = "2026-03-03";
 
-// Selezione dei candidati: il numero di titoli tenuti è lo stesso stampato nei parametri.
-const byMove = [...MARKET].sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct));
-const CAP_ORB = 6;
-const CAP_VWAP = 8;
-const ORB_SET = new Set(byMove.slice(0, CAP_ORB).map((x) => x.symbol));
-const VWAP_SET = new Set(
-  byMove.filter((x) => Math.abs(x.changePct) >= 0.4).slice(0, CAP_VWAP).map((x) => x.symbol)
-);
+function pickOrbAndVwapSets(market: MarketRow[]): { orbSet: Set<string>; vwapSet: Set<string> } {
+  // Selezione dei candidati: il numero di titoli tenuti è lo stesso stampato nei parametri.
+  const byMove = [...market].sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct));
+  const CAP_ORB = 6;
+  const CAP_VWAP = 8;
+  const orbSet = new Set(byMove.slice(0, CAP_ORB).map((x) => x.symbol));
+  const vwapSet = new Set(
+    byMove.filter((x) => Math.abs(x.changePct) >= 0.4).slice(0, CAP_VWAP).map((x) => x.symbol)
+  );
+  return { orbSet, vwapSet };
+}
 
-interface BookCell {
+export interface BookCell {
   side: Side;
   qty: number;
   avg: number;
@@ -195,7 +203,7 @@ interface BookCell {
   real: number;
 }
 
-interface BookRow {
+export interface BookRow {
   symbol: string;
   name: string;
   price: number;
@@ -203,74 +211,86 @@ interface BookRow {
   cells: BookCell[];
 }
 
-/** Stato di ogni titolo in ogni portafoglio laboratorio, derivato in modo deterministico. */
-export const BOOK: BookRow[] = MARKET.map((row, idx) => {
-  const qty = Math.floor(CAPITAL / MARKET.length / row.price);
-  const cells: BookCell[] = STRATEGIES.map((_, i) => {
-    const b = hash(i + "|" + row.symbol);
-    const c = hash(row.symbol + "#" + i);
-    let side: Side = "LONG";
-    // ORB: solo le 6 rotture più ampie, nella direzione della rottura
-    if (i === 0) side = !ORB_SET.has(row.symbol) ? "FLAT" : row.changePct > 0 ? "LONG" : "SHORT";
-    // pairs trading: gambe accoppiate, esposizione netta nulla
-    if (i === 1) side = idx % 2 === 0 ? "LONG" : "SHORT";
-    // VWAP reversion: contro le 8 estensioni maggiori dal VWAP
-    if (i === 2) side = !VWAP_SET.has(row.symbol) ? "FLAT" : row.changePct > 0 ? "SHORT" : "LONG";
+/** Stato di ogni titolo in ogni portafoglio laboratorio, derivato in modo deterministico dal dataset di mercato dato. */
+export function buildBook(market: MarketRow[]): BookRow[] {
+  const { orbSet, vwapSet } = pickOrbAndVwapSets(market);
+  return market.map((row, idx) => {
+    const qty = Math.floor(CAPITAL / market.length / row.price);
+    const cells: BookCell[] = STRATEGIES.map((_, i) => {
+      const b = hash(i + "|" + row.symbol);
+      const c = hash(row.symbol + "#" + i);
+      let side: Side = "LONG";
+      // ORB: solo le 6 rotture più ampie, nella direzione della rottura
+      if (i === 0) side = !orbSet.has(row.symbol) ? "FLAT" : row.changePct > 0 ? "LONG" : "SHORT";
+      // pairs trading: gambe accoppiate, esposizione netta nulla
+      if (i === 1) side = idx % 2 === 0 ? "LONG" : "SHORT";
+      // VWAP reversion: contro le 8 estensioni maggiori dal VWAP
+      if (i === 2) side = !vwapSet.has(row.symbol) ? "FLAT" : row.changePct > 0 ? "SHORT" : "LONG";
 
-    const movePct = (b - 0.44) * 2.4;
-    const dir = side === "SHORT" ? -1 : 1;
-    const avg = side === "FLAT" ? row.price : row.price / (1 + (dir * movePct) / 100);
-    const unreal = side === "FLAT" ? 0 : Math.round(dir * qty * (row.price - avg));
-    const hasClosed = side === "FLAT" ? c > 0.8 : i === 0 ? c > 0.66 : i === 1 ? c > 0.22 : c > 0.44;
-    const real = hasClosed ? Math.round((c - 0.38) * 420) : 0;
-    return { side, qty, avg, last: row.price, unreal, real };
+      const movePct = (b - 0.44) * 2.4;
+      const dir = side === "SHORT" ? -1 : 1;
+      const avg = side === "FLAT" ? row.price : row.price / (1 + (dir * movePct) / 100);
+      const unreal = side === "FLAT" ? 0 : Math.round(dir * qty * (row.price - avg));
+      const hasClosed = side === "FLAT" ? c > 0.8 : i === 0 ? c > 0.66 : i === 1 ? c > 0.22 : c > 0.44;
+      const real = hasClosed ? Math.round((c - 0.38) * 420) : 0;
+      return { side, qty, avg, last: row.price, unreal, real };
+    });
+    return { symbol: row.symbol, name: row.name, price: row.price, qty, cells };
   });
-  return { symbol: row.symbol, name: row.name, price: row.price, qty, cells };
-});
+}
 
 /** Realized/unrealized aggregati per strategia, sommando tutte le righe del libro comune. */
-export const STRATEGY_SUMS = STRATEGIES.map((_, i) =>
-  BOOK.reduce(
-    (acc, row) => {
-      acc.unrealized += row.cells[i].unreal;
-      acc.realized += row.cells[i].real;
-      return acc;
-    },
-    { unrealized: 0, realized: 0 }
-  )
-);
+export function buildStrategySums(book: BookRow[]): { unrealized: number; realized: number }[] {
+  return STRATEGIES.map((_, i) =>
+    book.reduce(
+      (acc, row) => {
+        acc.unrealized += row.cells[i].unreal;
+        acc.realized += row.cells[i].real;
+        return acc;
+      },
+      { unrealized: 0, realized: 0 }
+    )
+  );
+}
 
 /** Curva di equity intraday coerente col netto di ogni portafoglio (12 punti). */
-export const EQUITY_CURVES: number[][] = STRATEGY_SUMS.map((sum, i) => {
-  const net = sum.unrealized + sum.realized;
-  return Array.from({ length: 12 }, (_, k) => {
-    const t = k / 11;
-    return Math.round(net * t + (hash(i + "c" + k) - 0.5) * Math.abs(net) * 0.32 * (1 - Math.abs(t - 0.5)));
+export function buildEquityCurves(sums: { unrealized: number; realized: number }[]): number[][] {
+  return sums.map((sum, i) => {
+    const net = sum.unrealized + sum.realized;
+    return Array.from({ length: 12 }, (_, k) => {
+      const t = k / 11;
+      return Math.round(net * t + (hash(i + "c" + k) - 0.5) * Math.abs(net) * 0.32 * (1 - Math.abs(t - 0.5)));
+    });
   });
-});
+}
 
 /** Classifica intraday (solo per il badge "MIGLIORE OGGI" sulle card lab). */
-export const TODAY_RANK: number[] = (() => {
-  const order = STRATEGY_SUMS.map((sum, i) => ({
-    i,
-    net: sum.unrealized + sum.realized - STRATEGIES[i].backtest.costs,
-  })).sort((a, b) => b.net - a.net);
+export function buildTodayRank(sums: { unrealized: number; realized: number }[]): number[] {
+  const order = sums
+    .map((sum, i) => ({ i, net: sum.unrealized + sum.realized - STRATEGIES[i].backtest.costs }))
+    .sort((a, b) => b.net - a.net);
   const rankOf = new Array(STRATEGIES.length).fill(0);
   order.forEach((o, k) => (rankOf[o.i] = k));
   return rankOf;
-})();
+}
 
-/** Classifica del debriefing: basata sul netto delle 20 sedute di backtest. */
+/** Numero di posizioni con unrealized positivo su tutti i lab — banner regola EOD. */
+export function buildPositionsToClose(book: BookRow[]): number {
+  return book.reduce((n, row) => n + row.cells.filter((c) => c.unreal > 0).length, 0);
+}
+
+/** Dataset di fallback (demo), calcolato una volta dai prezzi statici in MARKET. */
+export const BOOK: BookRow[] = buildBook(MARKET);
+export const STRATEGY_SUMS = buildStrategySums(BOOK);
+export const EQUITY_CURVES: number[][] = buildEquityCurves(STRATEGY_SUMS);
+export const TODAY_RANK: number[] = buildTodayRank(STRATEGY_SUMS);
+export const POSITIONS_TO_CLOSE: number = buildPositionsToClose(BOOK);
+
+/** Classifica del debriefing: basata sul netto delle 20 sedute di backtest (storico, non dipende dal prezzo live). */
 export const BACKTEST_ORDER = STRATEGIES.map((s, i) => ({ i, net: s.backtest.net })).sort(
   (a, b) => b.net - a.net
 );
 export const BEST_STRATEGY_INDEX = BACKTEST_ORDER[0].i;
-
-/** Numero di posizioni con unrealized positivo su tutti i lab — banner regola EOD. */
-export const POSITIONS_TO_CLOSE = BOOK.reduce(
-  (n, row) => n + row.cells.filter((c) => c.unreal > 0).length,
-  0
-);
 
 function toPosition(row: BookRow, cellIndex: number): Position {
   const c = row.cells[cellIndex];
@@ -285,15 +305,20 @@ function toPosition(row: BookRow, cellIndex: number): Position {
   };
 }
 
-export function labPortfolio(strategyIndex: number): Portfolio {
+export function labPortfolio(
+  strategyIndex: number,
+  book: BookRow[] = BOOK,
+  sums: { unrealized: number; realized: number }[] = STRATEGY_SUMS,
+  curves: number[][] = EQUITY_CURVES
+): Portfolio {
   const s = STRATEGIES[strategyIndex];
-  const sum = STRATEGY_SUMS[strategyIndex];
+  const sum = sums[strategyIndex];
   return {
     id: s.code.toLowerCase().replace(" ", "-"),
     kind: "lab",
     strategyId: s.id,
     capital: CAPITAL,
-    positions: BOOK.filter((r) => r.cells[strategyIndex].side !== "FLAT").map((r) =>
+    positions: book.filter((r) => r.cells[strategyIndex].side !== "FLAT").map((r) =>
       toPosition(r, strategyIndex)
     ),
     realizedToday: sum.realized,
@@ -302,7 +327,7 @@ export function labPortfolio(strategyIndex: number): Portfolio {
     winRate: s.backtest.winRate,
     sharpe: s.backtest.sharpe,
     costs: s.backtest.costs,
-    equityIntraday: EQUITY_CURVES[strategyIndex],
+    equityIntraday: curves[strategyIndex],
   };
 }
 
@@ -421,4 +446,43 @@ export const BROKERS: BrokerStatus[] = [
 
 export function strategyByIndex(i: number): Strategy {
   return STRATEGIES[i];
+}
+
+// --- Dati di mercato live: stesso motore di simulazione, prezzi reali quando disponibili ---
+
+export interface LiveMarketData {
+  market: MarketRow[];
+  book: BookRow[];
+  strategySums: { unrealized: number; realized: number }[];
+  equityCurves: number[][];
+  todayRank: number[];
+  positionsToClose: number;
+}
+
+/** Dataset "live" di fallback: identico al dataset demo finché non arrivano quotazioni reali. */
+export const FALLBACK_LIVE_MARKET_DATA: LiveMarketData = {
+  market: MARKET,
+  book: BOOK,
+  strategySums: STRATEGY_SUMS,
+  equityCurves: EQUITY_CURVES,
+  todayRank: TODAY_RANK,
+  positionsToClose: POSITIONS_TO_CLOSE,
+};
+
+/**
+ * Sovrascrive prezzo/variazione con quotazioni reali (per i simboli disponibili) e
+ * ricalcola libro/aggregati con lo stesso motore deterministico usato per il fallback.
+ * La logica di simulazione delle 3 strategie resta invariata: cambia solo l'input.
+ */
+export function buildLiveMarketData(liveQuotes: Record<string, { price: number; changePct: number }>): LiveMarketData {
+  const market: MarketRow[] = MARKET.map((row) => {
+    const live = liveQuotes[row.symbol];
+    return live ? { ...row, price: live.price, changePct: live.changePct } : row;
+  });
+  const book = buildBook(market);
+  const strategySums = buildStrategySums(book);
+  const equityCurves = buildEquityCurves(strategySums);
+  const todayRank = buildTodayRank(strategySums);
+  const positionsToClose = buildPositionsToClose(book);
+  return { market, book, strategySums, equityCurves, todayRank, positionsToClose };
 }

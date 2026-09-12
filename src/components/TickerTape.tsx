@@ -1,8 +1,9 @@
-import { MARKET, dec, pnlColor } from "../data/mockData";
-
-const TAPE_ITEMS = [...MARKET, ...MARKET];
+import { dec, pnlColor } from "../data/mockData";
+import { useAppState } from "../context/AppState";
 
 export function TickerTape() {
+  const { liveMarket } = useAppState();
+  const tapeItems = [...liveMarket.market, ...liveMarket.market];
   return (
     <div
       style={{
@@ -34,7 +35,7 @@ export function TickerTape() {
       </div>
       <div style={{ overflow: "hidden", flex: "1 1 auto", minWidth: 0, height: "100%", display: "flex", alignItems: "center" }}>
         <div style={{ display: "flex", alignItems: "center", width: "max-content", animation: "tapeScroll 42s linear infinite" }}>
-          {TAPE_ITEMS.map((t, i) => (
+          {tapeItems.map((t, i) => (
             <div key={i} style={{ display: "flex", alignItems: "baseline", gap: 7, flex: "0 0 auto", padding: "0 14px" }}>
               <div className="mono" style={{ fontSize: 11.5, fontWeight: 500 }}>
                 {t.symbol}

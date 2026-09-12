@@ -1,5 +1,7 @@
 const PAPER_BASE = "https://paper-api.alpaca.markets";
 const LIVE_BASE = "https://api.alpaca.markets";
+/** Host dei market data: unico per paper e live, l'ambiente conta solo per il trading. */
+const DATA_BASE = "https://data.alpaca.markets";
 
 export type AlpacaEnvironment = "paper" | "live";
 
@@ -31,10 +33,9 @@ export function requireCredentials(): Credentials {
   return creds;
 }
 
-/** Chiamata autenticata all'API REST di Alpaca. Le chiavi non lasciano mai il server. */
-export async function alpacaFetch<T>(path: string, init?: RequestInit): Promise<T> {
+async function alpacaFetchFrom<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   const creds = requireCredentials();
-  const res = await fetch(creds.baseUrl + path, {
+  const res = await fetch(baseUrl + path, {
     ...init,
     headers: {
       "APCA-API-KEY-ID": creds.keyId,
@@ -49,6 +50,17 @@ export async function alpacaFetch<T>(path: string, init?: RequestInit): Promise<
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+/** Chiamata autenticata alla Trading API di Alpaca (paper o live). Le chiavi non lasciano mai il server. */
+export function alpacaFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const creds = requireCredentials();
+  return alpacaFetchFrom<T>(creds.baseUrl, path, init);
+}
+
+/** Chiamata autenticata alla Market Data API di Alpaca (prezzi/quotazioni, indipendente da paper/live). */
+export function alpacaDataFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  return alpacaFetchFrom<T>(DATA_BASE, path, init);
 }
 
 /** Maschera una API key id mostrando prefisso e ultimi 4 caratteri, come in "PK••••••••••7F2C". */
