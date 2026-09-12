@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { alpacaDataFetch, alpacaFetch } from "../../server/alpaca.js";
 import { UNIVERSE_SYMBOLS } from "../../server/universe.js";
 import { decideLabEodCloses, type LabOpenRow } from "../../server/labEod.js";
+import { fetchMarketSession } from "../../server/marketHours.js";
 import {
   ATR_THRESHOLD_PCT as ORB_ATR,
   MAX_POSITIONS as ORB_MAX,
@@ -40,12 +41,10 @@ interface RawBar {
   vw: number;
 }
 
-async function fetchDayBars(dateIso: string): Promise<Record<string, RawBar[]>> {
-  const start = `${dateIso}T00:00:00Z`;
-  const end = `${dateIso}T23:59:59Z`;
+async function fetchDayBars(openUtc: string, closeUtc: string): Promise<Record<string, RawBar[]>> {
   const symbols = UNIVERSE_SYMBOLS.join(",");
   const raw = await alpacaDataFetch<{ bars?: Record<string, RawBar[]> }>(
-    `/v2/stocks/bars?symbols=${encodeURIComponent(symbols)}&timeframe=5Min&limit=3000&feed=iex&sort=asc&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
+    `/v2/stocks/bars?symbols=${encodeURIComponent(symbols)}&timeframe=5Min&limit=3000&feed=iex&sort=asc&start=${encodeURIComponent(openUtc)}&end=${encodeURIComponent(closeUtc)}`
   );
   const out: Record<string, RawBar[]> = {};
   for (const s of UNIVERSE_SYMBOLS) out[s] = raw.bars?.[s] ?? [];
@@ -98,11 +97,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const [dayBars, dailyBarsHistory] = await Promise.all([fetchDayBars(date), fetchDailyBarsBefore(date, 90)]);
+    const session = await fetchMarketSession(date);
+    if (!session) {
+      res.status(200).json({ error: `${date} non è un giorno di borsa secondo il calendario Alpaca`, warnings });
+      return;
+    }
+
+    const [dayBars, dailyBarsHistory] = await Promise.all([
+      fetchDayBars(session.openUtc, session.closeUtc),
+      fetchDailyBarsBefore(date, 90),
+    ]);
 
     const symbolsWithData = UNIVERSE_SYMBOLS.filter((s) => dayBars[s].length > 0);
     if (symbolsWithData.length === 0) {
-      res.status(200).json({ error: `nessun dato per ${date} (festivo/weekend/fuori range?)`, warnings });
+      res.status(200).json({ error: `nessuna barra di sessione regolare per ${date}`, warnings });
       return;
     }
 

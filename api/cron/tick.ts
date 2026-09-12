@@ -3,6 +3,7 @@ import { alpacaDataFetch, alpacaFetch } from "../../server/alpaca.js";
 import { db } from "../../server/db.js";
 import { UNIVERSE_SYMBOLS } from "../../server/universe.js";
 import { decideLabEodCloses, type LabOpenRow } from "../../server/labEod.js";
+import { fetchMarketSession } from "../../server/marketHours.js";
 import {
   ATR_THRESHOLD_PCT as ORB_ATR_THRESHOLD_PCT,
   MAX_POSITIONS as ORB_MAX_POSITIONS,
@@ -61,38 +62,43 @@ interface AlpacaIntradayBarRaw {
   l: number;
   c: number;
   v: number;
+  vw: number;
 }
 
-interface FullSnapshot {
-  price: number;
-  vwap: number;
-}
-
-async function fetchSnapshots(): Promise<Record<string, FullSnapshot>> {
+async function fetchPrices(): Promise<Record<string, number>> {
   const symbols = UNIVERSE_SYMBOLS.join(",");
   const raw = await alpacaDataFetch<Record<string, AlpacaSnapshotRaw>>(
     `/v2/stocks/snapshots?symbols=${encodeURIComponent(symbols)}&feed=iex`
   );
-  const out: Record<string, FullSnapshot> = {};
+  const out: Record<string, number> = {};
   for (const symbol of UNIVERSE_SYMBOLS) {
     const s = raw[symbol];
-    const price = s?.dailyBar?.c ?? s?.latestTrade?.p;
-    const vwap = s?.dailyBar?.vw;
-    if (price != null && vwap != null) out[symbol] = { price, vwap };
+    const price = s?.latestTrade?.p ?? s?.dailyBar?.c;
+    if (price != null) out[symbol] = price;
   }
   return out;
 }
 
-async function fetchTodaySessionBars(now: Date): Promise<Record<string, AlpacaIntradayBarRaw[]>> {
-  const todayStart = new Date(now);
-  todayStart.setUTCHours(0, 0, 0, 0);
+/**
+ * Barre a 5 min della sola sessione regolare di oggi (9:30-16:00 ET, mai pre/post market).
+ * Usa il calendario reale di Alpaca per il confine esatto — un fetch da "mezzanotte UTC"
+ * includeva erroneamente le barre pre-market (dalle 4:00 ET), falsando sia il range di
+ * apertura ORB sia il VWAP di giornata. Bug trovato col backtest prima del primo giorno live.
+ */
+async function fetchTodaySessionBars(now: Date, sessionOpenUtc: string): Promise<Record<string, AlpacaIntradayBarRaw[]>> {
   const symbols = UNIVERSE_SYMBOLS.join(",");
   const raw = await alpacaDataFetch<{ bars?: Record<string, AlpacaIntradayBarRaw[]> }>(
-    `/v2/stocks/bars?symbols=${encodeURIComponent(symbols)}&timeframe=5Min&limit=3000&feed=iex&sort=asc&start=${encodeURIComponent(todayStart.toISOString())}`
+    `/v2/stocks/bars?symbols=${encodeURIComponent(symbols)}&timeframe=5Min&limit=3000&feed=iex&sort=asc&start=${encodeURIComponent(sessionOpenUtc)}&end=${encodeURIComponent(now.toISOString())}`
   );
   const out: Record<string, AlpacaIntradayBarRaw[]> = {};
   for (const symbol of UNIVERSE_SYMBOLS) out[symbol] = raw.bars?.[symbol] ?? [];
   return out;
+}
+
+function sessionVWAP(bars: AlpacaIntradayBarRaw[]): number | null {
+  const totalVol = bars.reduce((s, b) => s + b.v, 0);
+  if (totalVol === 0) return null;
+  return bars.reduce((s, b) => s + b.vw * b.v, 0) / totalVol;
 }
 
 async function fetchDailyBars(days: number): Promise<Record<string, OrbDailyBar[]>> {
@@ -153,17 +159,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const minutesToClose = (new Date(clock.next_close).getTime() - now.getTime()) / 60_000;
     const nearClose = minutesToClose <= EOD_CLOSE_WINDOW_MINUTES;
 
-    const [snapshots, sessionBars, openRows] = await Promise.all([
-      fetchSnapshots(),
-      fetchTodaySessionBars(now),
+    const session = await fetchMarketSession(tradingDate);
+    if (!session) {
+      // Non dovrebbe succedere se clock.is_open è true, ma niente sessione valida = niente da fare.
+      await db()`INSERT INTO tick_log (market_open, note) VALUES (true, 'calendario Alpaca senza sessione per oggi, salto')`;
+      res.status(200).json({ marketOpen: true, note: "nessuna sessione trovata nel calendario" });
+      return;
+    }
+
+    const [prices, sessionBars, openRows] = await Promise.all([
+      fetchPrices(),
+      fetchTodaySessionBars(now, session.openUtc),
       db()`
         SELECT id, strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price, entry_time, pair_key
         FROM lab_positions WHERE status = 'open'
       ` as unknown as Promise<LabPositionRow[]>,
     ]);
-
-    const prices: Record<string, number> = {};
-    for (const [symbol, s] of Object.entries(snapshots)) prices[symbol] = s.price;
 
     const vwapOpen: VwapOpenPosition[] = openRows
       .filter((r) => r.strategy_id === VWAP_STRATEGY_ID)
@@ -193,7 +204,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const vwapSnapshots: Record<string, VwapSnapshot> = {};
-    for (const [symbol, s] of Object.entries(snapshots)) vwapSnapshots[symbol] = { price: s.price, vwap: s.vwap };
+    for (const symbol of UNIVERSE_SYMBOLS) {
+      const price = prices[symbol];
+      const vwap = sessionVWAP(sessionBars[symbol]);
+      if (price != null && vwap != null) vwapSnapshots[symbol] = { price, vwap };
+    }
     const vwapBars: Record<string, { t: string; c: number }[]> = {};
     for (const symbol of UNIVERSE_SYMBOLS) vwapBars[symbol] = sessionBars[symbol].map((b) => ({ t: b.t, c: b.c }));
 
