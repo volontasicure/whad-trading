@@ -24,6 +24,7 @@ import {
   decideExits as decidePairsExits,
   pairKey,
   selectPairs,
+  statsForPair,
   type OpenLeg,
   type PairStats,
 } from "../../server/pairsTrading.js";
@@ -136,6 +137,8 @@ interface LabPositionRow {
   entry_price: number;
   entry_time: string;
   pair_key: string | null;
+  stop_price: number | null;
+  target_price: number | null;
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -171,7 +174,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       fetchPrices(),
       fetchTodaySessionBars(now, session.openUtc),
       db()`
-        SELECT id, strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price, entry_time, pair_key
+        SELECT id, strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price, entry_time,
+               pair_key, stop_price::float8 AS stop_price, target_price::float8 AS target_price
         FROM lab_positions WHERE status = 'open'
       ` as unknown as Promise<LabPositionRow[]>,
     ]);
@@ -179,29 +183,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const vwapOpen: VwapOpenPosition[] = openRows
       .filter((r) => r.strategy_id === VWAP_STRATEGY_ID)
       .map((r) => ({ id: r.id, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price, entryTime: r.entry_time }));
-    const orbOpen: OrbOpenPosition[] = [];
-    const pairsOpen: OpenLeg[] = openRows
-      .filter((r) => r.strategy_id === PAIRS_STRATEGY_ID && r.pair_key)
-      .map((r) => ({ id: r.id, pairKey: r.pair_key!, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price }));
-
-    // --- ORB: carica stop/target dallo stato salvato insieme alla posizione (lab_state) ---
-    const orbStopTargets = (await getCachedState<Record<number, { stop: number; target: number }>>(
-      ORB_STRATEGY_ID,
-      tradingDate,
-      "stop_targets"
-    )) ?? {};
-    for (const r of openRows.filter((r) => r.strategy_id === ORB_STRATEGY_ID)) {
-      const st = orbStopTargets[r.id];
-      orbOpen.push({
+    // Stop/target vivono sulla riga (non in una cache per data): una posizione ORB che
+    // sopravvive oltre la giornata in cui è stata aperta non li perde mai. Il fallback al
+    // prezzo di ingresso resta solo per righe pre-esistenti create prima di queste colonne.
+    const orbOpen: OrbOpenPosition[] = openRows
+      .filter((r) => r.strategy_id === ORB_STRATEGY_ID)
+      .map((r) => ({
         id: r.id,
         symbol: r.symbol,
         side: r.side,
         qty: r.qty,
         entryPrice: r.entry_price,
-        stopPrice: st?.stop ?? r.entry_price,
-        targetPrice: st?.target ?? r.entry_price,
-      });
-    }
+        stopPrice: r.stop_price ?? r.entry_price,
+        targetPrice: r.target_price ?? r.entry_price,
+      }));
+    const pairsOpen: OpenLeg[] = openRows
+      .filter((r) => r.strategy_id === PAIRS_STRATEGY_ID && r.pair_key)
+      .map((r) => ({ id: r.id, pairKey: r.pair_key!, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price }));
 
     const vwapSnapshots: Record<string, VwapSnapshot> = {};
     for (const symbol of UNIVERSE_SYMBOLS) {
@@ -229,10 +227,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
+    const openPairKeys = new Set(pairsOpen.map((l) => l.pairKey));
+    const coversAllOpenPairs = (stats: PairStats[]) =>
+      [...openPairKeys].every((k) => stats.some((p) => pairKey(p.a, p.b) === k));
+
     let orbAtr = (await getCachedState<Record<string, number>>(ORB_STRATEGY_ID, tradingDate, "atr")) ?? {};
     let pairStats = (await getCachedState<PairStats[]>(PAIRS_STRATEGY_ID, tradingDate, "pair_stats")) ?? [];
-    if (Object.keys(orbAtr).length === 0 || pairStats.length === 0) {
+    if (Object.keys(orbAtr).length === 0 || pairStats.length === 0 || !coversAllOpenPairs(pairStats)) {
       const dailyBars = await fetchDailyBars(90);
+      const closesBySymbol: Record<string, number[]> = {};
+      for (const symbol of UNIVERSE_SYMBOLS) closesBySymbol[symbol] = dailyBars[symbol].map((b) => b.c);
+
       if (Object.keys(orbAtr).length === 0) {
         const computed: Record<string, number> = {};
         for (const symbol of UNIVERSE_SYMBOLS) {
@@ -242,12 +247,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         await setCachedState(ORB_STRATEGY_ID, tradingDate, "atr", computed);
         orbAtr = computed;
       }
-      if (pairStats.length === 0) {
-        const closesBySymbol: Record<string, number[]> = {};
-        for (const symbol of UNIVERSE_SYMBOLS) closesBySymbol[symbol] = dailyBars[symbol].map((b) => b.c);
-        pairStats = selectPairs(closesBySymbol);
-        await setCachedState(PAIRS_STRATEGY_ID, tradingDate, "pair_stats", pairStats);
+
+      if (pairStats.length === 0) pairStats = selectPairs(closesBySymbol);
+      // Una coppia con posizione aperta deve restare valutabile per l'uscita anche se oggi
+      // non rientra più tra le MAX_PAIRS più correlate — altrimenti resterebbe aperta per
+      // sempre, "dimenticata", non appena la selezione giornaliera cambia.
+      for (const key of openPairKeys) {
+        if (pairStats.some((p) => pairKey(p.a, p.b) === key)) continue;
+        const [a, b] = key.split("/");
+        const stats = statsForPair(a, b, closesBySymbol);
+        if (stats) pairStats.push(stats);
       }
+      await setCachedState(PAIRS_STRATEGY_ID, tradingDate, "pair_stats", pairStats);
     }
 
     const pairStatsByKey: Record<string, PairStats> = {};
@@ -293,17 +304,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         orbInputs[symbol] = { price, openingRange: range, atrPct: atr, avgBarVolume: avgVol, latestBarVolume: bars[bars.length - 1].v };
       }
       const orbEntries = decideOrbEntries(UNIVERSE_SYMBOLS, orbStillOpenSymbols, orbInputs, ORB_MAX_POSITIONS - orbStillOpenSymbols.size);
-      const newStopTargets: Record<number, { stop: number; target: number }> = { ...orbStopTargets };
       for (const e of orbEntries) {
-        const rows = (await db()`
-          INSERT INTO lab_positions (strategy_id, symbol, side, qty, entry_price, entry_time, status)
-          VALUES (${ORB_STRATEGY_ID}, ${e.symbol}, ${e.side}, ${e.qty}, ${e.entryPrice}, ${now.toISOString()}, 'open')
-          RETURNING id
-        `) as unknown as { id: number }[];
-        const id = rows[0]?.id;
-        if (id != null) newStopTargets[id] = { stop: e.stopPrice, target: e.targetPrice };
+        await db()`
+          INSERT INTO lab_positions (strategy_id, symbol, side, qty, entry_price, entry_time, status, stop_price, target_price)
+          VALUES (${ORB_STRATEGY_ID}, ${e.symbol}, ${e.side}, ${e.qty}, ${e.entryPrice}, ${now.toISOString()}, 'open', ${e.stopPrice}, ${e.targetPrice})
+        `;
       }
-      if (orbEntries.length > 0) await setCachedState(ORB_STRATEGY_ID, tradingDate, "stop_targets", newStopTargets);
       entriesSummary.orb = orbEntries.length;
 
       const pairsStillOpenKeys = new Set(

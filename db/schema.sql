@@ -14,10 +14,16 @@ CREATE TABLE IF NOT EXISTS lab_positions (
   realized_pnl NUMERIC,
   status TEXT NOT NULL DEFAULT 'open',
   -- Collega le due gambe di una coppia (solo strategy_id = 'pairs'); NULL per le altre strategie.
-  pair_key TEXT
+  pair_key TEXT,
+  -- Stop/target dell'ORB, sulla riga e non in una cache per data: una posizione che
+  -- sopravvive oltre la giornata in cui è stata aperta non deve mai perderli.
+  stop_price NUMERIC,
+  target_price NUMERIC
 );
 
 ALTER TABLE lab_positions ADD COLUMN IF NOT EXISTS pair_key TEXT;
+ALTER TABLE lab_positions ADD COLUMN IF NOT EXISTS stop_price NUMERIC;
+ALTER TABLE lab_positions ADD COLUMN IF NOT EXISTS target_price NUMERIC;
 
 CREATE INDEX IF NOT EXISTS lab_positions_strategy_status_idx ON lab_positions (strategy_id, status);
 CREATE INDEX IF NOT EXISTS lab_positions_pair_key_idx ON lab_positions (pair_key) WHERE pair_key IS NOT NULL;

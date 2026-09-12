@@ -80,6 +80,30 @@ export function pairKey(a: string, b: string): string {
   return `${a}/${b}`;
 }
 
+function ratioStats(closesA: number[], closesB: number[]): { meanRatio: number; stdRatio: number } {
+  const n = Math.min(closesA.length, closesB.length);
+  const ratios: number[] = [];
+  for (let i = 0; i < n; i++) {
+    ratios.push(closesA[closesA.length - n + i] / closesB[closesB.length - n + i]);
+  }
+  const meanRatio = ratios.reduce((s, v) => s + v, 0) / ratios.length;
+  const variance = ratios.reduce((s, v) => s + (v - meanRatio) ** 2, 0) / ratios.length;
+  return { meanRatio, stdRatio: Math.sqrt(variance) };
+}
+
+/**
+ * Statistiche per una coppia specifica, a prescindere dal fatto che sia tra le MAX_PAIRS
+ * più correlate di oggi. Serve per non perdere di vista una posizione aperta la cui coppia
+ * è uscita dalla selezione giornaliera — l'uscita va comunque valutata, non ignorata.
+ */
+export function statsForPair(a: string, b: string, closesBySymbolAscending: Record<string, number[]>): PairStats | null {
+  const closesA = closesBySymbolAscending[a];
+  const closesB = closesBySymbolAscending[b];
+  if (!closesA || !closesB || closesA.length === 0 || closesB.length === 0) return null;
+  const corr = correlation(dailyLogReturns(closesA), dailyLogReturns(closesB));
+  return { a, b, correlation: corr, ...ratioStats(closesA, closesB) };
+}
+
 /**
  * Seleziona fino a MAX_PAIRS coppie candidate (stesso settore, massima correlazione sui
  * rendimenti giornalieri) e ne calcola media/deviazione standard del rapporto di prezzo,
@@ -111,18 +135,12 @@ export function selectPairs(closesBySymbolAscending: Record<string, number[]>): 
 
   candidates.sort((x, y) => y.correlation - x.correlation);
 
-  return candidates.slice(0, MAX_PAIRS).map(({ a, b, correlation: corr }) => {
-    const closesA = closesBySymbolAscending[a];
-    const closesB = closesBySymbolAscending[b];
-    const n = Math.min(closesA.length, closesB.length);
-    const ratios: number[] = [];
-    for (let i = 0; i < n; i++) {
-      ratios.push(closesA[closesA.length - n + i] / closesB[closesB.length - n + i]);
-    }
-    const meanRatio = ratios.reduce((s, v) => s + v, 0) / ratios.length;
-    const variance = ratios.reduce((s, v) => s + (v - meanRatio) ** 2, 0) / ratios.length;
-    return { a, b, correlation: corr, meanRatio, stdRatio: Math.sqrt(variance) };
-  });
+  return candidates.slice(0, MAX_PAIRS).map(({ a, b, correlation: corr }) => ({
+    a,
+    b,
+    correlation: corr,
+    ...ratioStats(closesBySymbolAscending[a], closesBySymbolAscending[b]),
+  }));
 }
 
 /** z-score del rapporto di prezzo corrente rispetto alla media/deviazione storica della coppia. */
