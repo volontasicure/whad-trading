@@ -55,3 +55,34 @@ CREATE TABLE IF NOT EXISTS tick_log (
   market_open BOOLEAN NOT NULL,
   note TEXT
 );
+
+-- Barre giornaliere persistite (storico multi-giorno), per non dipendere solo dalla cache
+-- effimera in lab_state e per avere dati disponibili ad analisi future (es. attribuzione
+-- di performance). Scritte da api/cron/tick.ts quando già scarica barre giornaliere da
+-- Alpaca per ATR/pairs trading, e dallo script una tantum scripts/backfill-daily-bars.mjs
+-- per lo storico precedente al primo giorno di raccolta live.
+CREATE TABLE IF NOT EXISTS daily_bars (
+  symbol TEXT NOT NULL,
+  trading_date DATE NOT NULL,
+  open NUMERIC NOT NULL,
+  high NUMERIC NOT NULL,
+  low NUMERIC NOT NULL,
+  close NUMERIC NOT NULL,
+  volume NUMERIC NOT NULL,
+  PRIMARY KEY (symbol, trading_date)
+);
+
+-- Barre a 5 minuti della sessione regolare, persistite tick dopo tick da api/cron/tick.ts
+-- (le stesse barre già scaricate da Alpaca per VWAP/RSI/range di apertura, oggi scartate
+-- dopo l'uso). Servono a ricostruire in seguito "cosa vedeva la strategia in quel momento".
+CREATE TABLE IF NOT EXISTS session_bars (
+  symbol TEXT NOT NULL,
+  bar_time TIMESTAMPTZ NOT NULL,
+  open NUMERIC NOT NULL,
+  high NUMERIC NOT NULL,
+  low NUMERIC NOT NULL,
+  close NUMERIC NOT NULL,
+  volume NUMERIC NOT NULL,
+  vwap NUMERIC NOT NULL,
+  PRIMARY KEY (symbol, bar_time)
+);

@@ -7,9 +7,10 @@
     "dev": "vite",
     "dev:full": "vercel dev",
     "build": "vite build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.server.json",
     "preview": "vite preview",
-    "db:migrate": "node scripts/migrate.mjs"
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:backfill-bars": "node scripts/backfill-daily-bars.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

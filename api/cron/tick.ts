@@ -4,15 +4,14 @@ import { db } from "../../server/db.js";
 import { UNIVERSE_SYMBOLS } from "../../server/universe.js";
 import { decideLabEodCloses, type LabOpenRow } from "../../server/labEod.js";
 import { fetchMarketSession } from "../../server/marketHours.js";
+import { saveDailyBars, saveSessionBars } from "../../server/barsStore.js";
 import {
-  ATR_THRESHOLD_PCT as ORB_ATR_THRESHOLD_PCT,
   MAX_POSITIONS as ORB_MAX_POSITIONS,
   STRATEGY_ID as ORB_STRATEGY_ID,
   computeATRPct,
   computeOpeningRange,
   decideEntries as decideOrbEntries,
   decideExits as decideOrbExits,
-  type DailyBar as OrbDailyBar,
   type EntryInputs as OrbEntryInputs,
   type OpenPosition as OrbOpenPosition,
   type OpeningRange,
@@ -22,6 +21,7 @@ import {
   STRATEGY_ID as PAIRS_STRATEGY_ID,
   decideEntries as decidePairsEntries,
   decideExits as decidePairsExits,
+  decidePairsEodCloses,
   pairKey,
   selectPairs,
   statsForPair,
@@ -52,13 +52,16 @@ interface AlpacaSnapshotRaw {
 
 interface AlpacaDailyBarRaw {
   t: string;
+  o: number;
   h: number;
   l: number;
   c: number;
+  v: number;
 }
 
 interface AlpacaIntradayBarRaw {
   t: string;
+  o: number;
   h: number;
   l: number;
   c: number;
@@ -96,19 +99,28 @@ async function fetchTodaySessionBars(now: Date, sessionOpenUtc: string): Promise
   return out;
 }
 
+/** Non deve mai bloccare/rompere il tick: la persistenza storica è un di più, non trading logic. */
+async function persistBarsBestEffort(label: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`persistenza barre (${label}) fallita, proseguo comunque:`, (err as Error).message);
+  }
+}
+
 function sessionVWAP(bars: AlpacaIntradayBarRaw[]): number | null {
   const totalVol = bars.reduce((s, b) => s + b.v, 0);
   if (totalVol === 0) return null;
   return bars.reduce((s, b) => s + b.vw * b.v, 0) / totalVol;
 }
 
-async function fetchDailyBars(days: number): Promise<Record<string, OrbDailyBar[]>> {
+async function fetchDailyBars(days: number): Promise<Record<string, AlpacaDailyBarRaw[]>> {
   const start = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const symbols = UNIVERSE_SYMBOLS.join(",");
   const raw = await alpacaDataFetch<{ bars?: Record<string, AlpacaDailyBarRaw[]> }>(
     `/v2/stocks/bars?symbols=${encodeURIComponent(symbols)}&timeframe=1Day&limit=10000&feed=iex&sort=asc&start=${encodeURIComponent(start)}`
   );
-  const out: Record<string, OrbDailyBar[]> = {};
+  const out: Record<string, AlpacaDailyBarRaw[]> = {};
   for (const symbol of UNIVERSE_SYMBOLS) out[symbol] = raw.bars?.[symbol] ?? [];
   return out;
 }
@@ -210,6 +222,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const vwapBars: Record<string, { t: string; c: number }[]> = {};
     for (const symbol of UNIVERSE_SYMBOLS) vwapBars[symbol] = sessionBars[symbol].map((b) => ({ t: b.t, c: b.c }));
 
+    await persistBarsBestEffort("session_bars", () =>
+      saveSessionBars(
+        UNIVERSE_SYMBOLS.flatMap((symbol) =>
+          sessionBars[symbol].map((b) => ({
+            symbol,
+            barTime: b.t,
+            open: b.o,
+            high: b.h,
+            low: b.l,
+            close: b.c,
+            volume: b.v,
+            vwap: b.vw,
+          }))
+        )
+      )
+    );
+
     const vwapExits = decideVwapExits(vwapOpen, vwapSnapshots, now);
     const orbExits = decideOrbExits(orbOpen, prices);
 
@@ -238,6 +267,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const closesBySymbol: Record<string, number[]> = {};
       for (const symbol of UNIVERSE_SYMBOLS) closesBySymbol[symbol] = dailyBars[symbol].map((b) => b.c);
 
+      await persistBarsBestEffort("daily_bars", () =>
+        saveDailyBars(
+          UNIVERSE_SYMBOLS.flatMap((symbol) =>
+            dailyBars[symbol].map((b) => ({
+              symbol,
+              tradingDate: b.t.slice(0, 10),
+              open: b.o,
+              high: b.h,
+              low: b.l,
+              close: b.c,
+              volume: b.v,
+            }))
+          )
+        )
+      );
+
       if (Object.keys(orbAtr).length === 0) {
         const computed: Record<string, number> = {};
         for (const symbol of UNIVERSE_SYMBOLS) {
@@ -264,6 +309,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const pairStatsByKey: Record<string, PairStats> = {};
     for (const p of pairStats) pairStatsByKey[pairKey(p.a, p.b)] = p;
     const pairsExits = decidePairsExits(pairsOpen, prices, pairStatsByKey);
+
+    // Raffreddamento post-stop: una coppia il cui z-score resta stabilmente oltre STOP_Z
+    // (relazione rotta per davvero, non rumore) va altrimenti in stop e rientra al tick
+    // successivo all'infinito — trovato con un backtest su dati storici reali (46 stop in
+    // un solo giorno sulla stessa coppia). Chi è uscita in stop oggi non rientra più oggi.
+    let stoppedPairsToday = (await getCachedState<string[]>(PAIRS_STRATEGY_ID, tradingDate, "stopped_today")) ?? [];
+    const newlyStopped = pairsExits.filter((e) => e.reason === "stop").map((e) => e.pairKey);
+    if (newlyStopped.length > 0) {
+      const merged = new Set([...stoppedPairsToday, ...newlyStopped]);
+      if (merged.size > stoppedPairsToday.length) {
+        stoppedPairsToday = [...merged];
+        await setCachedState(PAIRS_STRATEGY_ID, tradingDate, "stopped_today", stoppedPairsToday);
+      }
+    }
 
     // Applica le uscite di ogni strategia.
     for (const exit of vwapExits) {
@@ -315,7 +374,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const pairsStillOpenKeys = new Set(
         pairsOpen.filter((leg) => !pairsExits.some((e) => e.legIds.includes(leg.id))).map((leg) => leg.pairKey)
       );
-      const pairsEntries = decidePairsEntries(pairStats, pairsStillOpenKeys, prices, MAX_PAIRS - pairsStillOpenKeys.size);
+      const pairsExcludedKeys = new Set([...pairsStillOpenKeys, ...stoppedPairsToday]);
+      const pairsEntries = decidePairsEntries(pairStats, pairsExcludedKeys, prices, MAX_PAIRS - pairsStillOpenKeys.size);
       for (const e of pairsEntries) {
         for (const leg of e.legs) {
           await db()`
@@ -328,18 +388,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // --- Rete di sicurezza EOD: chiude qualunque posizione lab ancora aperta e in utile, a ridosso della chiusura ---
+    // Le coppie sono gestite separatamente (decidePairsEodCloses): le due gambe si chiudono
+    // insieme solo se il P&L combinato è positivo, mai una gamba sola — altrimenti quella
+    // rimasta resta orfana e nessuna logica la riprende più in mano (bug trovato con un
+    // backtest su dati storici reali prima del primo giorno live).
     let eodClosedCount = 0;
     if (nearClose) {
       const stillOpenIds = new Set([...vwapExits, ...orbExits].map((e) => e.position.id));
       for (const e of pairsExits) for (const id of e.legIds) stillOpenIds.add(id);
-      const remaining: LabOpenRow[] = openRows
-        .filter((r) => !stillOpenIds.has(r.id))
+      const remainingRows = openRows.filter((r) => !stillOpenIds.has(r.id));
+
+      const singleRows: LabOpenRow[] = remainingRows
+        .filter((r) => !r.pair_key)
         .map((r) => ({ id: r.id, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price }));
-      const eodCloses = decideLabEodCloses(remaining, prices);
-      for (const c of eodCloses) {
+      const singleCloses = decideLabEodCloses(singleRows, prices);
+      for (const c of singleCloses) {
         await db()`UPDATE lab_positions SET status='closed', exit_price=${c.exitPrice}, exit_time=${now.toISOString()}, realized_pnl=${c.realizedPnl} WHERE id=${c.id}`;
       }
-      eodClosedCount = eodCloses.length;
+
+      const pairLegRows: OpenLeg[] = remainingRows
+        .filter((r) => r.pair_key)
+        .map((r) => ({ id: r.id, pairKey: r.pair_key!, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price }));
+      const pairEodCloses = decidePairsEodCloses(pairLegRows, prices);
+      let pairLegsClosed = 0;
+      for (const pc of pairEodCloses) {
+        for (const legId of pc.legIds) {
+          const leg = pairLegRows.find((l) => l.id === legId);
+          const price = leg ? prices[leg.symbol] : undefined;
+          if (!leg || price == null) continue;
+          const dir = leg.side === "LONG" ? 1 : -1;
+          const legPnl = Math.round(leg.qty * (price - leg.entryPrice) * dir);
+          await db()`UPDATE lab_positions SET status='closed', exit_price=${price}, exit_time=${now.toISOString()}, realized_pnl=${legPnl} WHERE id=${legId}`;
+          pairLegsClosed++;
+        }
+      }
+
+      eodClosedCount = singleCloses.length + pairLegsClosed;
     }
 
     const note = `vwap: ${vwapExits.length} chiuse/${entriesSummary.vwap} aperte · orb: ${orbExits.length} chiuse/${entriesSummary.orb} aperte · pairs: ${pairsExits.length} chiuse/${entriesSummary.pairs} aperte${nearClose ? ` · EOD: ${eodClosedCount} chiuse` : ""}`;

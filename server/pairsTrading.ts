@@ -179,6 +179,48 @@ export interface EntryDecision {
   z: number;
 }
 
+export interface PairEodClose {
+  pairKey: string;
+  legIds: number[];
+}
+
+/**
+ * Rete di sicurezza EOD dedicata alle coppie: chiude ENTRAMBE le gambe solo se il P&L
+ * combinato della coppia è positivo, mai una gamba sola. Le due gambe sono scommesse
+ * opposte su titoli diversi — è normale che a fine giornata una sia in utile e l'altra in
+ * perdita. Usare la rete EOD generica (decideLabEodCloses di labEod.ts) riga per riga su
+ * queste posizioni chiuderebbe solo la gamba in utile, lasciando l'altra orfana: da quel
+ * momento decideExits sopra si rifiuta di valutarla ("gamba orfana: non si tocca alla
+ * cieca"), quindi resterebbe aperta indefinitamente, gestita da nessuna logica. Trovato
+ * con un backtest su dati storici reali prima del primo giorno live.
+ */
+export function decidePairsEodCloses(openLegs: OpenLeg[], prices: Record<string, number>): PairEodClose[] {
+  const byPair = new Map<string, OpenLeg[]>();
+  for (const leg of openLegs) {
+    if (!byPair.has(leg.pairKey)) byPair.set(leg.pairKey, []);
+    byPair.get(leg.pairKey)!.push(leg);
+  }
+
+  const closes: PairEodClose[] = [];
+  for (const [key, legs] of byPair) {
+    if (legs.length < 2) continue; // gamba già orfana per altra causa: non è compito di questa funzione
+    let combined = 0;
+    let allPriced = true;
+    for (const leg of legs) {
+      const price = prices[leg.symbol];
+      if (price == null) {
+        allPriced = false;
+        break;
+      }
+      const dir = leg.side === "LONG" ? 1 : -1;
+      combined += leg.qty * (price - leg.entryPrice) * dir;
+    }
+    if (!allPriced || combined <= 0) continue;
+    closes.push({ pairKey: key, legIds: legs.map((l) => l.id) });
+  }
+  return closes;
+}
+
 /** Chiude entrambe le gambe di una coppia sul rientro alla media o allo stop sullo spread. */
 export function decideExits(
   openLegs: OpenLeg[],

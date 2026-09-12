@@ -11,3 +11,5 @@ dev.bat
 .vercel
 .env*
 !.env.example
+
+.env*

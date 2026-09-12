@@ -1,0 +1,430 @@
+// Backtest locale: rigioca N giorni di mercato reali attraverso le stesse funzioni pure
+// di server/{orb,vwapReversion,pairsTrading,labEod}.ts, tutto in memoria, senza toccare
+// lab_positions/lab_state di produzione. Ricostruisce lo strumento descritto nel CLAUDE.md
+// del progetto ("Come validare prima di ogni mercato aperto") — rimosso in origine per
+// restare sotto il limite di 12 funzioni Vercel, qui è uno script locale (non deployato,
+// non conta nel budget) via `npx tsx scripts/backtest.ts [giorni]`.
+//
+// Usa daily_bars già persistito in DB per ATR/pairs trading, e scarica al volo da Alpaca
+// solo le barre a 5 minuti dei giorni da rigiocare (session_bars storico non esiste ancora,
+// il tick ha iniziato ad accumularlo solo da questa sessione in poi).
+
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { neon } from "@neondatabase/serverless";
+import { alpacaFetch, alpacaDataFetch } from "../server/alpaca.js";
+import { fetchMarketSession } from "../server/marketHours.js";
+import { UNIVERSE_SYMBOLS } from "../server/universe.js";
+import {
+  MAX_POSITIONS as ORB_MAX_POSITIONS,
+  computeATRPct,
+  computeOpeningRange,
+  decideEntries as decideOrbEntries,
+  decideExits as decideOrbExits,
+  type DailyBar as OrbDailyBar,
+  type EntryInputs as OrbEntryInputs,
+  type OpenPosition as OrbOpenPosition,
+  type OpeningRange,
+} from "../server/orb.js";
+import {
+  MAX_POSITIONS as VWAP_MAX_POSITIONS,
+  decideEntries as decideVwapEntries,
+  decideExits as decideVwapExits,
+  type Bar as VwapBar,
+  type OpenPosition as VwapOpenPosition,
+  type Snapshot as VwapSnapshot,
+} from "../server/vwapReversion.js";
+import {
+  MAX_PAIRS,
+  decideEntries as decidePairsEntries,
+  decideExits as decidePairsExits,
+  decidePairsEodCloses,
+  pairKey,
+  selectPairs,
+  statsForPair,
+  type OpenLeg,
+  type PairStats,
+} from "../server/pairsTrading.js";
+import { decideLabEodCloses, type LabOpenRow } from "../server/labEod.js";
+
+function loadEnvLocal() {
+  const p = path.resolve(process.cwd(), ".env.local");
+  let content: string;
+  try {
+    content = readFileSync(p, "utf8");
+  } catch {
+    return;
+  }
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
+    if (!(key in process.env)) process.env[key] = value;
+  }
+}
+loadEnvLocal();
+
+const POSTGRES_URL = process.env.POSTGRES_URL;
+if (!POSTGRES_URL) {
+  console.error("POSTGRES_URL mancante in .env.local.");
+  process.exit(1);
+}
+const sql = neon(POSTGRES_URL);
+
+interface AlpacaIntradayBarRaw {
+  t: string;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+  vw: number;
+}
+interface AlpacaCalendarEntry {
+  date: string;
+}
+
+async function fetchTradingDays(count: number): Promise<string[]> {
+  const end = new Date().toISOString().slice(0, 10);
+  const start = new Date(Date.now() - (count + 15) * 86_400_000).toISOString().slice(0, 10);
+  const cal = await alpacaFetch<AlpacaCalendarEntry[]>(`/v2/calendar?start=${start}&end=${end}`);
+  return cal.map((c) => c.date).slice(-count);
+}
+
+async function fetchSessionBars(startUtc: string, endUtc: string): Promise<Record<string, AlpacaIntradayBarRaw[]>> {
+  const raw = await alpacaDataFetch<{ bars?: Record<string, AlpacaIntradayBarRaw[]> }>(
+    `/v2/stocks/bars?symbols=${encodeURIComponent(UNIVERSE_SYMBOLS.join(","))}&timeframe=5Min&limit=3000&feed=iex&sort=asc&start=${encodeURIComponent(startUtc)}&end=${encodeURIComponent(endUtc)}`
+  );
+  const out: Record<string, AlpacaIntradayBarRaw[]> = {};
+  for (const s of UNIVERSE_SYMBOLS) out[s] = raw.bars?.[s] ?? [];
+  return out;
+}
+
+function sessionVWAP(bars: AlpacaIntradayBarRaw[]): number | null {
+  const totalVol = bars.reduce((s, b) => s + b.v, 0);
+  if (totalVol === 0) return null;
+  return bars.reduce((s, b) => s + b.vw * b.v, 0) / totalVol;
+}
+
+async function loadDailyClosesBeforeDate(beforeDateIso: string): Promise<Record<string, OrbDailyBar[]>> {
+  const out: Record<string, OrbDailyBar[]> = {};
+  for (const symbol of UNIVERSE_SYMBOLS) {
+    const rows = (await sql.query(
+      `SELECT trading_date, open, high, low, close FROM daily_bars
+       WHERE symbol = $1 AND trading_date < $2 ORDER BY trading_date DESC LIMIT 120`,
+      [symbol, beforeDateIso]
+    )) as { trading_date: string; open: string; high: string; low: string; close: string }[];
+    out[symbol] = rows
+      .reverse()
+      .map((r) => ({ t: r.trading_date, o: Number(r.open), h: Number(r.high), l: Number(r.low), c: Number(r.close) }));
+  }
+  return out;
+}
+
+interface SimOrbPos extends OrbOpenPosition {}
+interface SimVwapPos extends VwapOpenPosition {}
+interface SimPairLeg extends OpenLeg {}
+
+const anomalies: string[] = [];
+function flag(msg: string) {
+  anomalies.push(msg);
+  console.warn("  ANOMALIA:", msg);
+}
+
+const totals = {
+  orb: { realized: 0, entries: 0, exits: 0, exitReasons: {} as Record<string, number> },
+  vwap: { realized: 0, entries: 0, exits: 0, exitReasons: {} as Record<string, number> },
+  pairs: { realized: 0, entries: 0, exits: 0, exitReasons: {} as Record<string, number> },
+};
+
+async function run() {
+  const dayCount = Number(process.argv[2]) || 5;
+  const tradingDays = await fetchTradingDays(dayCount);
+  console.log(`Rigioco ${tradingDays.length} giorni di mercato: ${tradingDays.join(", ")}\n`);
+
+  let nextId = 1;
+  let orbOpen: SimOrbPos[] = [];
+  let vwapOpen: SimVwapPos[] = [];
+  let pairsOpen: SimPairLeg[] = [];
+  const strategyOf = new Map<number, "orb" | "vwap" | "pairs">();
+
+  for (const day of tradingDays) {
+    const session = await fetchMarketSession(day);
+    if (!session) {
+      flag(`[${day}] nessuna sessione nel calendario Alpaca (inatteso per un trading day)`);
+      continue;
+    }
+
+    const sessionBars = await fetchSessionBars(session.openUtc, session.closeUtc);
+    const openMs = new Date(session.openUtc).getTime();
+    for (const s of UNIVERSE_SYMBOLS) {
+      for (const b of sessionBars[s]) {
+        if (new Date(b.t).getTime() < openMs) {
+          flag(`[${day}] ${s}: barra pre-market rilevata (${b.t} < apertura ${session.openUtc}) — regressione bug di contaminazione già corretto in passato`);
+        }
+      }
+    }
+
+    const timeSet = new Set<string>();
+    for (const s of UNIVERSE_SYMBOLS) for (const b of sessionBars[s]) timeSet.add(b.t);
+    const times = [...timeSet].sort();
+    if (times.length === 0) {
+      flag(`[${day}] nessuna barra intraday ricevuta per nessun simbolo, salto il giorno`);
+      continue;
+    }
+
+    const dailyBarsBefore = await loadDailyClosesBeforeDate(day);
+    const closesBySymbol: Record<string, number[]> = {};
+    for (const s of UNIVERSE_SYMBOLS) closesBySymbol[s] = dailyBarsBefore[s].map((b) => b.c);
+
+    const orbAtr: Record<string, number> = {};
+    for (const s of UNIVERSE_SYMBOLS) {
+      const atr = computeATRPct(dailyBarsBefore[s]);
+      if (atr != null) orbAtr[s] = atr;
+    }
+    if (Object.keys(orbAtr).length === 0) flag(`[${day}] ATR non calcolabile per nessun simbolo (storico daily insufficiente prima di questa data)`);
+
+    let pairStats: PairStats[] = selectPairs(closesBySymbol);
+    const openPairKeysAtStart = new Set(pairsOpen.map((l) => l.pairKey));
+    for (const key of openPairKeysAtStart) {
+      if (pairStats.some((p) => pairKey(p.a, p.b) === key)) continue;
+      const [a, b] = key.split("/");
+      const st = statsForPair(a, b, closesBySymbol);
+      if (st) pairStats.push(st);
+    }
+
+    let openingRanges: Record<string, OpeningRange> = {};
+    let dayCounters = { orbEntries: 0, orbExits: 0, vwapEntries: 0, vwapExits: 0, pairsEntries: 0, pairsExits: 0 };
+    const closeMs = new Date(session.closeUtc).getTime();
+    const stoppedPairsToday = new Set<string>(); // raffreddamento post-stop, azzerato a ogni giorno
+
+    for (const timeIso of times) {
+      const now = new Date(timeIso);
+      const barsUpToNow: Record<string, AlpacaIntradayBarRaw[]> = {};
+      const prices: Record<string, number> = {};
+      for (const s of UNIVERSE_SYMBOLS) {
+        const bars = sessionBars[s].filter((b) => new Date(b.t).getTime() <= now.getTime());
+        barsUpToNow[s] = bars;
+        if (bars.length > 0) prices[s] = bars[bars.length - 1].c;
+      }
+
+      if (Object.keys(openingRanges).length === 0) {
+        for (const s of UNIVERSE_SYMBOLS) {
+          const range = computeOpeningRange(barsUpToNow[s].map((b) => ({ h: b.h, l: b.l })));
+          if (range) openingRanges[s] = range;
+        }
+      }
+
+      const vwapSnapshots: Record<string, VwapSnapshot> = {};
+      for (const s of UNIVERSE_SYMBOLS) {
+        const vwap = sessionVWAP(barsUpToNow[s]);
+        if (prices[s] != null && vwap != null) vwapSnapshots[s] = { price: prices[s], vwap };
+      }
+      const vwapBars: Record<string, VwapBar[]> = {};
+      for (const s of UNIVERSE_SYMBOLS) vwapBars[s] = barsUpToNow[s].map((b) => ({ t: b.t, c: b.c }));
+
+      let vwapExits: ReturnType<typeof decideVwapExits> = [];
+      let orbExits: ReturnType<typeof decideOrbExits> = [];
+      let pairsExits: ReturnType<typeof decidePairsExits> = [];
+      try {
+        vwapExits = decideVwapExits(vwapOpen, vwapSnapshots, now);
+      } catch (e) {
+        flag(`[${day} ${timeIso}] eccezione in decideVwapExits: ${(e as Error).message}`);
+      }
+      try {
+        orbExits = decideOrbExits(orbOpen, prices);
+      } catch (e) {
+        flag(`[${day} ${timeIso}] eccezione in decideOrbExits: ${(e as Error).message}`);
+      }
+      const pairStatsByKey: Record<string, PairStats> = {};
+      for (const p of pairStats) pairStatsByKey[pairKey(p.a, p.b)] = p;
+      try {
+        pairsExits = decidePairsExits(pairsOpen, prices, pairStatsByKey);
+      } catch (e) {
+        flag(`[${day} ${timeIso}] eccezione in decidePairsExits: ${(e as Error).message}`);
+      }
+
+      for (const ex of vwapExits) {
+        totals.vwap.realized += ex.realizedPnl;
+        totals.vwap.exits++;
+        dayCounters.vwapExits++;
+        totals.vwap.exitReasons[ex.reason] = (totals.vwap.exitReasons[ex.reason] ?? 0) + 1;
+        vwapOpen = vwapOpen.filter((p) => p.id !== ex.position.id);
+        strategyOf.delete(ex.position.id);
+      }
+      for (const ex of orbExits) {
+        totals.orb.realized += ex.realizedPnl;
+        totals.orb.exits++;
+        dayCounters.orbExits++;
+        totals.orb.exitReasons[ex.reason] = (totals.orb.exitReasons[ex.reason] ?? 0) + 1;
+        orbOpen = orbOpen.filter((p) => p.id !== ex.position.id);
+        strategyOf.delete(ex.position.id);
+      }
+      for (const ex of pairsExits) {
+        totals.pairs.realized += ex.realizedPnl;
+        totals.pairs.exits++;
+        dayCounters.pairsExits++;
+        totals.pairs.exitReasons[ex.reason] = (totals.pairs.exitReasons[ex.reason] ?? 0) + 1;
+        pairsOpen = pairsOpen.filter((l) => !ex.legIds.includes(l.id));
+        for (const id of ex.legIds) strategyOf.delete(id);
+        if (ex.reason === "stop") stoppedPairsToday.add(ex.pairKey);
+      }
+
+      const minutesToClose = (closeMs - now.getTime()) / 60_000;
+      const nearClose = minutesToClose <= 20;
+
+      if (!nearClose) {
+        const vwapStillOpenSymbols = new Set(vwapOpen.map((p) => p.symbol));
+        let vwapEntries: ReturnType<typeof decideVwapEntries> = [];
+        try {
+          vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpenSymbols, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpenSymbols.size);
+        } catch (e) {
+          flag(`[${day} ${timeIso}] eccezione in decideVwapEntries: ${(e as Error).message}`);
+        }
+        for (const e of vwapEntries) {
+          const id = nextId++;
+          vwapOpen.push({ id, symbol: e.symbol, side: e.side, qty: e.qty, entryPrice: e.entryPrice, entryTime: timeIso });
+          strategyOf.set(id, "vwap");
+          totals.vwap.entries++;
+          dayCounters.vwapEntries++;
+        }
+
+        const orbStillOpenSymbols = new Set(orbOpen.map((p) => p.symbol));
+        const orbInputs: Record<string, OrbEntryInputs> = {};
+        for (const s of UNIVERSE_SYMBOLS) {
+          const range = openingRanges[s];
+          const atr = orbAtr[s];
+          const bars = barsUpToNow[s];
+          const price = prices[s];
+          if (!range || atr == null || bars.length === 0 || price == null) continue;
+          const avgVol = bars.reduce((a, b) => a + b.v, 0) / bars.length;
+          orbInputs[s] = { price, openingRange: range, atrPct: atr, avgBarVolume: avgVol, latestBarVolume: bars[bars.length - 1].v };
+        }
+        let orbEntries: ReturnType<typeof decideOrbEntries> = [];
+        try {
+          orbEntries = decideOrbEntries(UNIVERSE_SYMBOLS, orbStillOpenSymbols, orbInputs, ORB_MAX_POSITIONS - orbStillOpenSymbols.size);
+        } catch (e) {
+          flag(`[${day} ${timeIso}] eccezione in decideOrbEntries: ${(e as Error).message}`);
+        }
+        for (const e of orbEntries) {
+          const id = nextId++;
+          orbOpen.push({ id, symbol: e.symbol, side: e.side, qty: e.qty, entryPrice: e.entryPrice, stopPrice: e.stopPrice, targetPrice: e.targetPrice });
+          strategyOf.set(id, "orb");
+          totals.orb.entries++;
+          dayCounters.orbEntries++;
+        }
+
+        const pairsStillOpenKeys = new Set(pairsOpen.map((l) => l.pairKey));
+        const pairsExcludedKeys = new Set([...pairsStillOpenKeys, ...stoppedPairsToday]);
+        let pairsEntries: ReturnType<typeof decidePairsEntries> = [];
+        try {
+          pairsEntries = decidePairsEntries(pairStats, pairsExcludedKeys, prices, MAX_PAIRS - pairsStillOpenKeys.size);
+        } catch (e) {
+          flag(`[${day} ${timeIso}] eccezione in decidePairsEntries: ${(e as Error).message}`);
+        }
+        for (const e of pairsEntries) {
+          for (const leg of e.legs) {
+            const id = nextId++;
+            pairsOpen.push({ id, pairKey: e.pairKey, symbol: leg.symbol, side: leg.side, qty: leg.qty, entryPrice: leg.entryPrice });
+            strategyOf.set(id, "pairs");
+          }
+          totals.pairs.entries += e.legs.length;
+          dayCounters.pairsEntries += e.legs.length;
+        }
+      }
+
+      // Controlli di sanità a ogni passo
+      if (orbOpen.length > ORB_MAX_POSITIONS) flag(`[${day} ${timeIso}] ORB supera MAX_POSITIONS: ${orbOpen.length} > ${ORB_MAX_POSITIONS}`);
+      if (vwapOpen.length > VWAP_MAX_POSITIONS) flag(`[${day} ${timeIso}] VWAP supera MAX_POSITIONS: ${vwapOpen.length} > ${VWAP_MAX_POSITIONS}`);
+      const legsByPair = new Map<string, number>();
+      for (const l of pairsOpen) legsByPair.set(l.pairKey, (legsByPair.get(l.pairKey) ?? 0) + 1);
+      if (legsByPair.size > MAX_PAIRS) flag(`[${day} ${timeIso}] pairs supera MAX_PAIRS: ${legsByPair.size} > ${MAX_PAIRS}`);
+      for (const [key, count] of legsByPair) if (count !== 2) flag(`[${day} ${timeIso}] coppia ${key} ha ${count} gambe aperte, attese 2`);
+      for (const p of [...orbOpen, ...vwapOpen, ...pairsOpen]) {
+        if (!Number.isFinite(p.qty) || p.qty <= 0) flag(`[${day} ${timeIso}] qty non valida per ${p.symbol}: ${p.qty}`);
+        if (!Number.isFinite(p.entryPrice) || p.entryPrice <= 0) flag(`[${day} ${timeIso}] entryPrice non valido per ${p.symbol}: ${p.entryPrice}`);
+      }
+    }
+
+    // Rete di sicurezza EOD, come in tick.ts dopo il fix: singole (ORB/VWAP) riga per riga,
+    // coppie come unità unica (entrambe le gambe solo se il P&L combinato è positivo).
+    const lastPrices: Record<string, number> = {};
+    for (const s of UNIVERSE_SYMBOLS) {
+      const bars = sessionBars[s];
+      if (bars.length > 0) lastPrices[s] = bars[bars.length - 1].c;
+    }
+
+    const singleRows: LabOpenRow[] = [
+      ...orbOpen.map((p) => ({ id: p.id, symbol: p.symbol, side: p.side, qty: p.qty, entryPrice: p.entryPrice })),
+      ...vwapOpen.map((p) => ({ id: p.id, symbol: p.symbol, side: p.side, qty: p.qty, entryPrice: p.entryPrice })),
+    ];
+    let singleCloses: ReturnType<typeof decideLabEodCloses> = [];
+    try {
+      singleCloses = decideLabEodCloses(singleRows, lastPrices);
+    } catch (e) {
+      flag(`[${day}] eccezione in decideLabEodCloses: ${(e as Error).message}`);
+    }
+    for (const c of singleCloses) {
+      const strat = strategyOf.get(c.id);
+      if (strat) {
+        totals[strat].realized += c.realizedPnl;
+        totals[strat].exits++;
+        totals[strat].exitReasons["eod_safety_net"] = (totals[strat].exitReasons["eod_safety_net"] ?? 0) + 1;
+      } else {
+        flag(`[${day}] chiusura EOD per id ${c.id} senza strategia nota (bug di bookkeeping nel backtest, non nel prodotto)`);
+      }
+      strategyOf.delete(c.id);
+    }
+
+    let pairEodCloses: ReturnType<typeof decidePairsEodCloses> = [];
+    try {
+      pairEodCloses = decidePairsEodCloses(pairsOpen, lastPrices);
+    } catch (e) {
+      flag(`[${day}] eccezione in decidePairsEodCloses: ${(e as Error).message}`);
+    }
+    const pairEodLegIds = new Set<number>();
+    for (const pc of pairEodCloses) {
+      for (const legId of pc.legIds) {
+        pairEodLegIds.add(legId);
+        const leg = pairsOpen.find((l) => l.id === legId);
+        const price = leg ? lastPrices[leg.symbol] : undefined;
+        if (!leg || price == null) continue;
+        const dir = leg.side === "LONG" ? 1 : -1;
+        totals.pairs.realized += Math.round(leg.qty * (price - leg.entryPrice) * dir);
+        totals.pairs.exits++;
+        totals.pairs.exitReasons["eod_safety_net"] = (totals.pairs.exitReasons["eod_safety_net"] ?? 0) + 1;
+        strategyOf.delete(legId);
+      }
+    }
+
+    const eodIds = new Set(singleCloses.map((c) => c.id));
+    orbOpen = orbOpen.filter((p) => !eodIds.has(p.id));
+    vwapOpen = vwapOpen.filter((p) => !eodIds.has(p.id));
+    pairsOpen = pairsOpen.filter((l) => !pairEodLegIds.has(l.id));
+    const eodCloses = [...singleCloses, ...[...pairEodLegIds].map((id) => ({ id }))];
+
+    console.log(
+      `[${day}] orb: ${dayCounters.orbEntries} entrate/${dayCounters.orbExits} uscite | ` +
+        `vwap: ${dayCounters.vwapEntries} entrate/${dayCounters.vwapExits} uscite | ` +
+        `pairs: ${dayCounters.pairsEntries} entrate/${dayCounters.pairsExits} uscite | ` +
+        `EOD: ${eodCloses.length} chiuse | posizioni residue: orb=${orbOpen.length} vwap=${vwapOpen.length} pairs=${pairsOpen.length}`
+    );
+  }
+
+  console.log("\n=== Riepilogo finale ===");
+  for (const [name, t] of Object.entries(totals)) {
+    console.log(`${name}: ${t.entries} entrate, ${t.exits} uscite, P&L realizzato = ${t.realized}, motivi uscita:`, t.exitReasons);
+  }
+  console.log(`\nAnomalie rilevate: ${anomalies.length}`);
+  for (const a of anomalies) console.log(" -", a);
+  if (anomalies.length === 0) console.log("Nessuna anomalia rilevata sui giorni testati.");
+}
+
+run().catch((err) => {
+  console.error("Backtest fallito:", err);
+  process.exit(1);
+});
