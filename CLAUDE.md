@@ -10,7 +10,9 @@ Frontend React + Vite + TypeScript con le 6 viste ricostruite fedelmente dal des
 
 **Nessuna scrittura automatica verso il broker**: "Conferma e attiva" nel debriefing aggiorna solo lo stato locale della UI, non chiama `submitOrder`. Deliberato: finché non esiste una logica di strategia reale, collegare l'invio ordini userebbe segnali finti spacciandoli per un algoritmo funzionante — vedi "Prossimi passi".
 
-**Automazione**: chiusura EOD reale via Vercel Cron (`api/cron/eod-close.ts`, schedulato in `vercel.json`) — chiude le posizioni reali con unrealized positivo a ridosso della chiusura di mercato. Nessun altro job schedulato esiste ancora (debriefing serale, allineamento lab).
+**Automazione**: chiusura EOD reale via Vercel Cron (`api/cron/eod-close.ts`, schedulato in `vercel.json`) — chiude le posizioni reali con unrealized positivo a ridosso della chiusura di mercato. Un secondo tick (`api/cron/tick.ts`) gira ogni 10 minuti in orario di mercato via GitHub Actions (`.github/workflows/tick.yml`, non Vercel Cron — troppo poco frequente sul piano Hobby): per ora è solo uno scheletro che verifica il market clock e scrive un log in `tick_log`, **non contiene ancora nessuna logica di strategia**.
+
+**Database**: Postgres (Neon, collegato via marketplace Vercel). Schema in `db/schema.sql`, applicato con `npm run db:migrate` (richiede `.env.local` da `vercel env pull`). Tabelle: `lab_positions` (posizioni simulate per strategia), `lab_state` (indicatori intraday accumulati per strategia/giorno, es. range di apertura, VWAP), `sessions` (storico sedute reale — sostituirà `SESSIONS` in `mockData.ts`), `tick_log` (log delle invocazioni del tick, per verificare che lo scheduler giri davvero).
 
 ## Riferimenti di design
 
@@ -35,6 +37,9 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 - `api/broker/*.ts` — funzioni serverless Vercel che parlano con la Trading API di Alpaca usando le chiavi lato server (`api/lib/alpaca.ts`).
 - `api/market/quotes.ts` — legge gli snapshot reali dalla Market Data API di Alpaca (`api/lib/alpaca.ts` → `alpacaDataFetch`, host `data.alpaca.markets`, separato dalla Trading API).
 - `api/cron/eod-close.ts` — chiusura EOD reale, schedulata via Vercel Cron in `vercel.json`. Protetta da `CRON_SECRET` (Vercel la invia da sola come header `Authorization: Bearer` quando la variabile è impostata).
+- `api/cron/tick.ts` — tick periodico (scheletro, vedi sopra), invocato da GitHub Actions. Protetto da `TICK_SECRET` (va impostato a mano sia su Vercel sia come secret del repo GitHub — nessun auto-injection qui, a differenza di `CRON_SECRET`).
+- `api/lib/db.ts` — client Neon condiviso (`db()`), lazy-init su `POSTGRES_URL`.
+- `db/schema.sql` + `scripts/migrate.mjs` — schema e migrazione (locale, non automatica al deploy).
 - Routing reale con `react-router-dom`: `/lab`, `/strategie/:id`, `/debriefing`, `/reale`, `/storico`, `/regole`.
 
 ### Adapter broker: cosa fa e cosa no
@@ -69,9 +74,9 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 
 ## Prossimi passi
 
-1. **Logica reale delle 3 strategie** (ORB, pairs trading, VWAP reversion) — il pezzo più grosso rimasto. Richiede: dati storici intraday (barre a 1 min da Alpaca), un motore di decisione che gira periodicamente durante l'orario di mercato, e soprattutto **una persistenza** (database) per tracciare lo stato di ogni lab tra un'esecuzione e l'altra delle funzioni serverless — che sono stateless. Da scegliere prima di scrivere la logica: dove vive questo stato (Vercel Postgres/KV, Supabase, altro).
+1. **Logica reale delle 3 strategie** (ORB, pairs trading, VWAP reversion) — il pezzo più grosso rimasto, ora sbloccato (database + scheduler pronti in `api/cron/tick.ts`). Da fare per ognuna: dati storici intraday (barre a 1 min da Alpaca), regole di ingresso/uscita, persistenza in `lab_positions`/`lab_state`. Partire da una sola strategia per volta e validare prima di aggiungere le altre due — non tutte insieme.
 2. Una volta che i lab hanno segnali reali: collegare "Conferma e attiva" a `submitOrder` per davvero, con conferma asincrona e stato di errore (oggi non progettato).
-3. Debriefing serale automatico (job schedulato che consolida lo storico a 20 sedute) — dipende anch'esso dalla persistenza del punto 1.
+3. Debriefing serale automatico e `Storico` reale (popolare `sessions` da `lab_positions` invece dei mock in `mockData.ts`).
 4. Lot-matching per il realized P&L preciso (vedi limite noto sopra).
 5. `streamQuotes` via WebSocket Alpaca — richiede un servizio a lunga esecuzione separato, non funzioni serverless Vercel (il polling REST attuale ogni 20s è il sostituto pragmatico).
 6. Stati ancora da progettare: loading, disconnessione API, mercato chiuso, stop di portafoglio scattato, conferma mancante a mercato aperto. Chiedere prima di inventarli.

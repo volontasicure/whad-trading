@@ -1,0 +1,25 @@
+name: Market tick
+
+# Scheduler esterno per api/cron/tick.ts: Vercel Cron gratuito gira al massimo una volta
+# al giorno, troppo poco per controllare i prezzi ogni pochi minuti durante il mercato.
+# Finestra 13-21 UTC copre l'orario NYSE (9:30-16:00 ET) sia in EDT che in EST; la funzione
+# stessa verifica il market clock reale e non fa nulla fuori orario.
+on:
+  schedule:
+    - cron: "*/10 13-21 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call tick endpoint
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.TICK_SECRET }}" \
+            https://whad-trading.vercel.app/api/cron/tick)
+          echo "HTTP $status"
+          cat response.json
+          if [ "$status" -ge 300 ]; then
+            exit 1
+          fi
