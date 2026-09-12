@@ -16,7 +16,7 @@ import {
 
 export function LabView() {
   const navigate = useNavigate();
-  const { pnlMode, eodAutoClose, liveMarket } = useAppState();
+  const { pnlMode, eodAutoClose, liveMarket, realLabStrategies } = useAppState();
   const { book, strategySums, equityCurves, todayRank, positionsToClose } = liveMarket;
 
   return (
@@ -29,12 +29,30 @@ export function LabView() {
             const sum = strategySums[i];
             const rank = todayRank[i];
             const net = sum.unrealized + sum.realized;
+            const hasRealData = Boolean(realLabStrategies[s.id]);
             return (
               <div key={s.id} className="card" style={{ padding: "16px 16px 14px", display: "flex", flexDirection: "column", gap: 14 }}>
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 100 }}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
-                    <div className="mono" style={{ fontSize: 10, letterSpacing: "0.13em", color: "var(--text-faint)" }}>
-                      {s.code}
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <div className="mono" style={{ fontSize: 10, letterSpacing: "0.13em", color: "var(--text-faint)" }}>
+                        {s.code}
+                      </div>
+                      <div
+                        className="mono"
+                        title={hasRealData ? "Posizioni reali da lab_positions" : "Nessuna posizione reale ancora: dati simulati"}
+                        style={{
+                          fontSize: 8.5,
+                          letterSpacing: "0.08em",
+                          padding: "2px 5px",
+                          borderRadius: 4,
+                          whiteSpace: "nowrap",
+                          background: hasRealData ? "var(--green-tint)" : "var(--fill-neutral)",
+                          color: hasRealData ? "var(--green-ink)" : "var(--text-faint)",
+                        }}
+                      >
+                        {hasRealData ? "REALE" : "SIMULATO"}
+                      </div>
                     </div>
                     <div style={{ fontSize: 16, fontWeight: 500, letterSpacing: "-0.01em", lineHeight: 1.25 }}>{s.name}</div>
                     <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)", lineHeight: 1.45 }}>{s.logic}</div>
