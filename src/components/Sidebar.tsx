@@ -19,24 +19,19 @@ function useCountdown(now: Date): string {
   return parts.map((x) => String(x).padStart(2, "0")).join(":");
 }
 
-export function Sidebar() {
+interface SidebarProps {
+  mobileOpen: boolean;
+  onNavigate: () => void;
+}
+
+export function Sidebar({ mobileOpen, onNavigate }: SidebarProps) {
   const { now } = useAppState();
   const countdown = useCountdown(now);
   const alpaca = BROKERS.find((b) => b.id === "alpaca")!;
   const ibkr = BROKERS.find((b) => b.id === "ibkr")!;
 
   return (
-    <div
-      style={{
-        width: 228,
-        flex: "0 0 228px",
-        background: "var(--bg-surface)",
-        borderRight: "1px solid var(--border-main)",
-        display: "flex",
-        flexDirection: "column",
-        padding: "24px 0 18px",
-      }}
-    >
+    <div className={`sidebar-panel${mobileOpen ? " open" : ""}`}>
       <div style={{ padding: "0 20px 24px", display: "flex", flexDirection: "column", gap: 4 }}>
         <div className="mono" style={{ fontSize: 14, fontWeight: 600, letterSpacing: "0.14em" }}>
           WHAD<span style={{ color: "var(--accent)" }}>·</span>TRADING
@@ -51,6 +46,7 @@ export function Sidebar() {
           <NavLink
             key={item.to}
             to={item.to}
+            onClick={onNavigate}
             className={({ isActive }) => `sidebar-nav-item${isActive ? " active" : ""}`}
             style={{
               display: "flex",

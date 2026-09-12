@@ -255,3 +255,91 @@ table-row-hover:hover,
 .no-scrollbar-x {
   overflow-x: auto;
 }
+
+.app-shell {
+  display: flex;
+  align-items: stretch;
+  min-height: 100vh;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.sidebar-panel {
+  width: 228px;
+  flex: 0 0 228px;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-main);
+  display: flex;
+  flex-direction: column;
+  padding: 24px 0 18px;
+}
+
+.mobile-topbar {
+  display: none;
+}
+
+.mobile-nav-overlay {
+  display: none;
+}
+
+/* Sotto la soglia tablet: la sidebar diventa un pannello a scomparsa aperto da un
+   pulsante hamburger, invece di restare sempre affiancata al contenuto (causa dello
+   scroll orizzontale forzato su iPhone). iPad e desktop non sono toccati da queste regole. */
+@media (max-width: 767px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-main);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  .mobile-nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 auto;
+    border-radius: 7px;
+    border: 1px solid var(--border-control);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: 15px;
+    cursor: pointer;
+  }
+
+  .sidebar-panel {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(82vw, 280px);
+    flex: none;
+    z-index: 30;
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+  }
+
+  .sidebar-panel.open {
+    transform: translateX(0);
+  }
+
+  .mobile-nav-overlay.open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 15, 12, 0.35);
+    z-index: 25;
+  }
+}
