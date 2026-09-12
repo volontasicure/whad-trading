@@ -24,6 +24,8 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 
 ## Struttura del codice
 
+**Il codice server condiviso vive in `server/`, non in `api/lib/`**: Vercel (piano Hobby) conta ogni file `.ts` dentro `api/` come una funzione serverless a sé, incluso codice che non è una route (l'abbiamo scoperto quando `api/lib/*` ha fatto sforare il limite di 12 funzioni e bloccato un deploy). Solo i file con un handler route-abile vanno sotto `api/`; tutto ciò che è solo importato (client Alpaca, client DB, costanti condivise) va in `server/`.
+
 - `src/types.ts` — interfacce del modello dati e contratto `BrokerAdapter` (da `API.md`).
 - `src/data/mockData.ts` — dati finti deterministici (stessa logica hash del prototipo) + helper di formattazione (`money`, `dec`, `pnlColor`, `formatPnl`).
 - `src/context/AppState.tsx` — stato condiviso: toggle Valore/%, conferma debriefing, countdown.
@@ -34,11 +36,11 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 - `src/hooks/useAlpacaStatus.ts` — stato del broker, fallback silenzioso ai dati finti.
 - `src/hooks/useRealPortfolio.ts` — posizioni/P&L/esecuzioni reali del conto Alpaca, fallback silenzioso ai dati finti.
 - `src/context/AppState.tsx` — oltre allo stato UI, polla `/api/market/quotes` ogni 20s ed espone `liveMarket` (ricalcolato con `buildLiveMarketData` in `mockData.ts`) a tutte le viste.
-- `api/broker/*.ts` — funzioni serverless Vercel che parlano con la Trading API di Alpaca usando le chiavi lato server (`api/lib/alpaca.ts`).
-- `api/market/quotes.ts` — legge gli snapshot reali dalla Market Data API di Alpaca (`api/lib/alpaca.ts` → `alpacaDataFetch`, host `data.alpaca.markets`, separato dalla Trading API).
+- `api/broker/*.ts` — funzioni serverless Vercel che parlano con la Trading API di Alpaca usando le chiavi lato server (`server/alpaca.ts`).
+- `api/market/quotes.ts` — legge gli snapshot reali dalla Market Data API di Alpaca (`server/alpaca.ts` → `alpacaDataFetch`, host `data.alpaca.markets`, separato dalla Trading API).
 - `api/cron/eod-close.ts` — chiusura EOD reale, schedulata via Vercel Cron in `vercel.json`. Protetta da `CRON_SECRET` (Vercel la invia da sola come header `Authorization: Bearer` quando la variabile è impostata).
 - `api/cron/tick.ts` — tick periodico (scheletro, vedi sopra), invocato da GitHub Actions. Protetto da `TICK_SECRET` (va impostato a mano sia su Vercel sia come secret del repo GitHub — nessun auto-injection qui, a differenza di `CRON_SECRET`).
-- `api/lib/db.ts` — client Neon condiviso (`db()`), lazy-init su `POSTGRES_URL`.
+- `server/db.ts` — client Neon condiviso (`db()`), lazy-init su `POSTGRES_URL`.
 - `db/schema.sql` + `scripts/migrate.mjs` — schema e migrazione (locale, non automatica al deploy).
 - Routing reale con `react-router-dom`: `/lab`, `/strategie/:id`, `/debriefing`, `/reale`, `/storico`, `/regole`.
 

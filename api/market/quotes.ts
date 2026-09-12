@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { alpacaDataFetch } from "../lib/alpaca.js";
-import { UNIVERSE_SYMBOLS } from "../lib/universe.js";
+import { alpacaDataFetch } from "../../server/alpaca.js";
+import { UNIVERSE_SYMBOLS } from "../../server/universe.js";
 
 interface AlpacaSnapshot {
   latestTrade?: { p: number };

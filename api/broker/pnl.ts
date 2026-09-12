@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { alpacaFetch } from "../lib/alpaca.js";
+import { alpacaFetch } from "../../server/alpaca.js";
 
 interface AlpacaPortfolioHistory {
   profit_loss: number[];
