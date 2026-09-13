@@ -2,8 +2,10 @@ name: Strategy monitor
 
 # Controllo di sanità sui tre laboratori ogni 30 minuti in orario di mercato — verifica
 # come si stanno comportando le tre strategie (posizioni oltre i limiti, gambe orfane nel
-# pairs trading, tick fermo, valori non validi) e segnala il risultato tramite l'esito del
-# run stesso (fallito = anomalie trovate) finché non viene collegato l'invio email.
+# pairs trading, tick fermo, valori non validi). Se trova anomalie, manda una mail via
+# Resend (RESEND_API_KEY) a nicolaforria@gmail.com con l'elenco e i suggerimenti; il run
+# risulta comunque "fallito" su GitHub in quel caso, visibile a colpo d'occhio anche senza
+# aprire la mail.
 #
 # Stessa finestra oraria di tick.yml (13-21 UTC copre l'orario NYSE sia in EDT sia in EST);
 # lo script verifica da solo il vero orologio di mercato ed esce subito se è chiuso.
@@ -27,3 +29,4 @@ jobs:
           ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
           ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
           ALPACA_ENV: ${{ secrets.ALPACA_ENV }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}

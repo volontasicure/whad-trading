@@ -1,9 +1,10 @@
 // Controllo di sanità sui tre laboratori, pensato per girare ogni 30 minuti in orario di
-// mercato via GitHub Actions (.github/workflows/monitor.yml) — parte 1 di quanto discusso
-// in sessione: verifica come si stanno comportando le tre strategie e segnala anomalie.
-// Parte 2 (invio email) e parte 3 (avvio fix dalla mail) non ancora implementate: per ora
-// l'esito va nel log della Action (exit code 1 se trova anomalie, così il run risulta
-// "fallito" ed è visibile a colpo d'occhio nella lista delle Action).
+// mercato via GitHub Actions (.github/workflows/monitor.yml) — verifica come si stanno
+// comportando le tre strategie e segnala anomalie. Se ne trova, manda una mail via Resend
+// (RESEND_API_KEY) a ALERT_EMAIL con l'elenco e i suggerimenti; l'esito resta comunque nel
+// log della Action (exit code 1 se trova anomalie, così il run risulta "fallito" ed è
+// visibile a colpo d'occhio anche senza aprire la mail). Parte 3 (avviare un fix dalla
+// mail) non ancora implementata.
 //
 // Si ferma da solo se il mercato non è realmente aperto in questo momento (stesso
 // /v2/clock usato da api/cron/tick.ts) — non dipende dalla sola finestra oraria del cron.
@@ -59,6 +60,53 @@ const STRATEGY_LABELS: Record<string, string> = {
 const anomalies: { summary: string; suggestion: string }[] = [];
 function flag(summary: string, suggestion: string) {
   anomalies.push({ summary, suggestion });
+}
+const perfLines: string[] = [];
+
+const ALERT_EMAIL = "nicolaforria@gmail.com";
+
+/** Invio best-effort: un problema con l'email non deve far sparire la segnalazione (resta comunque nel log/exit code). */
+async function sendAlertEmail(perfSummary: string[]): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn("RESEND_API_KEY mancante: salto l'invio email, l'anomalia resta comunque nel log di questa Action.");
+    return;
+  }
+  const runUrl =
+    process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
+      ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+      : null;
+
+  const lines: string[] = [];
+  lines.push(`WHAD Trading — ${anomalies.length} anomalia/e rilevata/e alle ${new Date().toISOString()}`, "");
+  for (const a of anomalies) {
+    lines.push(`• ${a.summary}`);
+    lines.push(`  Suggerimento: ${a.suggestion}`, "");
+  }
+  if (perfSummary.length > 0) {
+    lines.push("Performance di oggi:", ...perfSummary.map((l) => `  ${l}`), "");
+  }
+  if (runUrl) lines.push(`Log completo: ${runUrl}`);
+
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: "WHAD Trading <onboarding@resend.dev>",
+        to: [ALERT_EMAIL],
+        subject: `⚠ WHAD Trading — ${anomalies.length} anomalia/e rilevata/e`,
+        text: lines.join("\n"),
+      }),
+    });
+    if (!res.ok) {
+      console.error(`Invio email fallito: Resend ha risposto ${res.status} ${await res.text().catch(() => "")}`);
+      return;
+    }
+    console.log(`Email di alert inviata a ${ALERT_EMAIL}.`);
+  } catch (err) {
+    console.error("Invio email fallito:", (err as Error).message);
+  }
 }
 
 async function run() {
@@ -141,7 +189,9 @@ async function run() {
     for (const id of [ORB_STRATEGY_ID, VWAP_STRATEGY_ID, PAIRS_STRATEGY_ID]) {
       const row = perf.find((p) => p.strategy_id === id);
       const openNow = id === PAIRS_STRATEGY_ID ? `${pairsLegsOpen} gambe aperte` : `${countByStrategy[id] ?? 0} aperte`;
-      console.log(`  ${STRATEGY_LABELS[id]}: ${row?.trades ?? 0} chiuse, P&L ${row?.pnl ?? 0} | ${openNow}`);
+      const line = `${STRATEGY_LABELS[id]}: ${row?.trades ?? 0} chiuse, P&L ${row?.pnl ?? 0} | ${openNow}`;
+      console.log(`  ${line}`);
+      perfLines.push(line);
     }
   }
 
@@ -151,7 +201,10 @@ async function run() {
     console.log(`   Suggerimento: ${a.suggestion}`);
   }
 
-  if (anomalies.length > 0) process.exitCode = 1;
+  if (anomalies.length > 0) {
+    process.exitCode = 1;
+    await sendAlertEmail(perfLines);
+  }
 }
 
 run().catch((err) => {
