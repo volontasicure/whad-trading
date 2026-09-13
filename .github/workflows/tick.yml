@@ -14,6 +14,16 @@ on:
     - cron: "*/5 13-21 * * 1-5"
   workflow_dispatch: {}
 
+# Impedisce a due esecuzioni di girare in parallelo (es. un run manuale mentre quello
+# automatico è già in corso) — tick.ts non ha transazioni né lock a livello di database,
+# quindi due esecuzioni sovrapposte potrebbero leggere lo stesso stato "aperto" e decidere
+# entrambe di aprire la stessa posizione. cancel-in-progress: false mette in coda la nuova
+# esecuzione invece di interrompere a metà quella in corso (che lascerebbe scritture
+# parziali) — se un'altra arriva nel frattempo, sostituisce quella in coda, non si accumula.
+concurrency:
+  group: market-tick
+  cancel-in-progress: false
+
 jobs:
   tick:
     runs-on: ubuntu-latest
