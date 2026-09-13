@@ -38,6 +38,15 @@ import {
 } from "../../server/vwapReversion.js";
 
 const EOD_CLOSE_WINDOW_MINUTES = 20;
+// Guard contro esecuzioni troppo ravvicinate: protegge sia da un TICK_SECRET trapelato
+// (repo pubblico, un secret condiviso che finisse in un log/commit permetterebbe a chiunque
+// di richiamare l'endpoint) sia da un bug di concorrenza reale — due esecuzioni sovrapposte
+// non hanno alcun lock a livello di database e potrebbero decidere entrambe di aprire la
+// stessa posizione. Il blocco concurrency in tick.yml protegge solo dalle nostre esecuzioni
+// GitHub Actions; questo protegge anche da chi chiamasse l'endpoint Vercel direttamente.
+// 60s è ben sotto la cadenza normale di 5 minuti, quindi non interferisce mai in condizioni
+// normali.
+const MIN_TICK_INTERVAL_MS = 60_000;
 
 interface AlpacaClock {
   is_open: boolean;
@@ -161,6 +170,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    const lastRunRows = (await db()`
+      SELECT ran_at FROM tick_log ORDER BY ran_at DESC LIMIT 1
+    `) as unknown as { ran_at: string }[];
+    if (lastRunRows.length > 0) {
+      const sinceLastMs = Date.now() - new Date(lastRunRows[0].ran_at).getTime();
+      if (sinceLastMs < MIN_TICK_INTERVAL_MS) {
+        res.status(429).json({ error: `Esecuzione troppo ravvicinata: ultima ${Math.round(sinceLastMs / 1000)}s fa (minimo ${MIN_TICK_INTERVAL_MS / 1000}s)` });
+        return;
+      }
+    }
+
     const clock = await alpacaFetch<AlpacaClock>("/v2/clock");
     if (!clock.is_open) {
       const note = `mercato chiuso, prossima apertura ${clock.next_open}`;
