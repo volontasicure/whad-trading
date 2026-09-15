@@ -6,9 +6,14 @@ name: Market tick
 # stessa verifica il market clock reale e non fa nulla fuori orario.
 #
 # Cadenza a 5 minuti: coincide con la granularità delle barre usate per RSI/VWAP (sotto i
-# 5 minuti non c'è comunque nuova informazione dai dati), ed è la soglia sotto la quale
-# GitHub esegue gli schedule "a impegno migliore" (esecuzioni che possono slittare o
-# saltare). Repo pubblico = minuti Actions illimitati, quindi nessun vincolo di costo qui.
+# 5 minuti non c'è comunque nuova informazione dai dati). GitHub esegue gli schedule sotto
+# i 5 minuti "a impegno migliore" (esecuzioni che possono slittare parecchio, osservato in
+# pratica su intervalli di 15-40 minuti anche a questa cadenza) — per questo cron-job.org
+# (esterno, stesso TICK_SECRET) è il chiamante primario con cadenza reale di 5 minuti.
+# Questo schedule resta attivo come backup ridondante: se le due chiamate cadono a meno di
+# 60s l'una dall'altra, il guard anti-overlap in tick.ts ne rifiuta una con HTTP 429 — atteso
+# e innocuo (vedi step sotto), non un errore. Repo pubblico = minuti Actions illimitati,
+# quindi nessun vincolo di costo nel tenerlo comunque attivo.
 on:
   schedule:
     - cron: "*/5 13-21 * * 1-5"
@@ -35,6 +40,10 @@ jobs:
             https://whad-trading.vercel.app/api/cron/tick)
           echo "HTTP $status"
           cat response.json
+          if [ "$status" -eq 429 ]; then
+            echo "429 atteso: cron-job.org (chiamante primario, stessa cadenza di 5 min) è arrivato entro 60s — non è un errore, questo schedule è solo un backup ridondante."
+            exit 0
+          fi
           if [ "$status" -ge 300 ]; then
             exit 1
           fi
