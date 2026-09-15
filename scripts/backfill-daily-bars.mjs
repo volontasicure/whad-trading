@@ -34,8 +34,13 @@ function loadEnvLocal() {
 loadEnvLocal();
 
 const UNIVERSE_SYMBOLS = [
-  "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "JPM", "BAC", "XOM", "CVX",
-  "KO", "PEP", "UNH", "JNJ", "PG", "CAT", "HON", "LIN", "TXN", "V",
+  "AAPL", "MSFT", "NVDA", "GOOGL", "META", "TXN", "AVGO", "ORCL", "CRM",
+  "JPM", "BAC", "V", "MA", "WFC", "GS",
+  "XOM", "CVX", "COP", "SLB",
+  "KO", "PEP", "PG", "WMT", "COST",
+  "UNH", "JNJ", "ABBV", "LLY", "MRK", "TMO",
+  "CAT", "HON", "LIN", "BA", "GE",
+  "AMZN", "HD", "MCD", "NKE", "SBUX",
 ];
 
 const connectionString = process.env.POSTGRES_URL;

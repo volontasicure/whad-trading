@@ -17,7 +17,7 @@ export const STOP_Z = 3.5;
 
 export type Side = "LONG" | "SHORT";
 
-/** Raggruppamento settoriale dei 20 titoli dell'universo — usato solo per candidare le coppie. */
+/** Raggruppamento settoriale dei 40 titoli dell'universo — usato solo per candidare le coppie. */
 export const SECTORS: Record<string, string> = {
   AAPL: "tech",
   MSFT: "tech",
@@ -25,20 +25,40 @@ export const SECTORS: Record<string, string> = {
   GOOGL: "tech",
   META: "tech",
   TXN: "tech",
+  AVGO: "tech",
+  ORCL: "tech",
+  CRM: "tech",
   JPM: "financials",
   BAC: "financials",
   V: "financials",
+  MA: "financials",
+  WFC: "financials",
+  GS: "financials",
   XOM: "energy",
   CVX: "energy",
+  COP: "energy",
+  SLB: "energy",
   KO: "staples",
   PEP: "staples",
   PG: "staples",
+  WMT: "staples",
+  COST: "staples",
   UNH: "healthcare",
   JNJ: "healthcare",
+  ABBV: "healthcare",
+  LLY: "healthcare",
+  MRK: "healthcare",
+  TMO: "healthcare",
   CAT: "industrials",
   HON: "industrials",
   LIN: "industrials",
+  BA: "industrials",
+  GE: "industrials",
   AMZN: "consumer_disc",
+  HD: "consumer_disc",
+  MCD: "consumer_disc",
+  NKE: "consumer_disc",
+  SBUX: "consumer_disc",
 };
 
 export interface PairStats {

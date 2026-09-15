@@ -287,7 +287,7 @@ function CompositionTable({
         <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
           <div style={{ fontSize: 15, fontWeight: 500 }}>Composizione comune</div>
           <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>
-            Stessi 20 titoli, stesso capitale, equal weight — l'unica variabile è la strategia.
+            Stessi 40 titoli, stesso capitale, equal weight — l'unica variabile è la strategia.
           </div>
         </div>
         <div className="mono" style={{ fontSize: 10, letterSpacing: "0.1em", color: "var(--text-faint)", whiteSpace: "nowrap" }}>

@@ -118,7 +118,7 @@ export interface SessionRules {
   eodOrderTime: string;
   debriefTime: string;
   autoConfirm: boolean;
-  /** 20 simboli */
+  /** 40 simboli */
   universe: string[];
   capitalPerPortfolio: number;
   weighting: "equal";
