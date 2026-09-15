@@ -46,7 +46,7 @@ export function DebriefView() {
     proposedNote = proposed?.note ?? "";
     proposedId = proposed?.id ?? top.strategyId;
     proposalLine = `${proposedNote} Netto reale sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"}: ${money(top.net)} $.`;
-    basisLine = `Punteggio sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"} reali: P&amp;L netto realizzato (lab_positions). Sharpe/win rate non ancora calcolati sul reale.`;
+    basisLine = `Punteggio sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"} reali: P&L netto realizzato (lab_positions). Sharpe/win rate non ancora calcolati sul reale.`;
   } else {
     const best = STRATEGIES[BEST_STRATEGY_INDEX];
     ranking = BACKTEST_ORDER.map((o, k) => {
