@@ -4,12 +4,68 @@ import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
 import { BACKTEST_ORDER, BEST_STRATEGY_INDEX, DEBRIEF, STRATEGIES, dec, money } from "../data/mockData";
 
+interface DisplayRankEntry {
+  strategyId: string;
+  name: string;
+  note: string;
+  /** Etichetta pronta per la UI: netto reale in € per i dati reali, punteggio 0-20 per il fallback finto. */
+  scoreLabel: string;
+  /** 0-100, per la barra. */
+  barPct: number;
+}
+
 export function DebriefView() {
   const navigate = useNavigate();
-  const { confirmed, autoConfirm, confirmChoice } = useAppState();
+  const { confirmed, autoConfirm, confirmChoice, realDebrief } = useAppState();
 
-  const best = STRATEGIES[BEST_STRATEGY_INDEX];
   const isConfirmed = confirmed || autoConfirm;
+  const hasRealRanking = Boolean(realDebrief && realDebrief.sessionsUsed > 0 && realDebrief.proposedStrategyId);
+
+  let ranking: DisplayRankEntry[];
+  let proposedName: string;
+  let proposedNote: string;
+  let proposedId: string;
+  let proposalLine: string;
+  let basisLine: string;
+
+  if (hasRealRanking && realDebrief) {
+    const maxAbsNet = Math.max(1, ...realDebrief.ranking.map((e) => Math.abs(e.net)));
+    ranking = realDebrief.ranking.map((e) => {
+      const s = STRATEGIES.find((st) => st.id === e.strategyId);
+      return {
+        strategyId: e.strategyId,
+        name: s?.name ?? e.strategyId,
+        note: s?.note ?? "",
+        scoreLabel: `${money(e.net)} $`,
+        barPct: Math.max(0, (e.net / maxAbsNet) * 100),
+      };
+    });
+    const top = realDebrief.ranking[0];
+    const proposed = STRATEGIES.find((s) => s.id === realDebrief.proposedStrategyId);
+    proposedName = proposed?.name ?? top.strategyId;
+    proposedNote = proposed?.note ?? "";
+    proposedId = proposed?.id ?? top.strategyId;
+    proposalLine = `${proposedNote} Netto reale sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"}: ${money(top.net)} $.`;
+    basisLine = `Punteggio sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"} reali: P&amp;L netto realizzato (lab_positions). Sharpe/win rate non ancora calcolati sul reale.`;
+  } else {
+    const best = STRATEGIES[BEST_STRATEGY_INDEX];
+    ranking = BACKTEST_ORDER.map((o, k) => {
+      const s = STRATEGIES[o.i];
+      const entry = DEBRIEF.ranking[k];
+      return {
+        strategyId: s.id,
+        name: s.name,
+        note: s.note,
+        scoreLabel: dec(entry.score, 1),
+        barPct: (entry.score / 20) * 100,
+      };
+    });
+    proposedName = best.name;
+    proposedNote = best.note;
+    proposedId = best.id;
+    proposalLine = `${best.note} Netto più alto sulle ultime 20 sedute: ${money(BACKTEST_ORDER[0].net)} $ dopo i costi, Sharpe ${dec(best.backtest.sharpe, 2)}.`;
+    basisLine = "Punteggio su 20 sedute (dati simulati, nessuno storico reale ancora): P&L netto al netto dei costi, Sharpe, % vincenti e coerenza con il regime di volatilità attesa.";
+  }
 
   return (
     <>
@@ -18,43 +74,52 @@ export function DebriefView() {
       <div style={{ padding: "22px 30px 40px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: 18, alignItems: "start" }}>
         <div className="card" style={{ overflow: "hidden" }}>
           <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--border-divider)", display: "flex", flexDirection: "column", gap: 3 }}>
-            <div style={{ fontSize: 15, fontWeight: 500 }}>Classifica del debriefing</div>
-            <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>
-              Punteggio su 20 sedute: P&amp;L netto al netto dei costi, Sharpe, % vincenti e coerenza con il regime di
-              volatilità atteso.
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ fontSize: 15, fontWeight: 500 }}>Classifica del debriefing</div>
+              <div
+                className="mono"
+                title={hasRealRanking ? "Netto reale da lab_positions" : "Nessuno storico reale ancora: classifica su backtest finto"}
+                style={{
+                  fontSize: 8.5,
+                  letterSpacing: "0.08em",
+                  padding: "2px 5px",
+                  borderRadius: 4,
+                  whiteSpace: "nowrap",
+                  background: hasRealRanking ? "var(--green-tint)" : "var(--fill-neutral)",
+                  color: hasRealRanking ? "var(--green-ink)" : "var(--text-faint)",
+                }}
+              >
+                {hasRealRanking ? "REALE" : "SIMULATO"}
+              </div>
             </div>
+            <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>{basisLine}</div>
           </div>
-          {BACKTEST_ORDER.map((o, k) => {
-            const s = STRATEGIES[o.i];
-            const entry = DEBRIEF.ranking[k];
-            const barW = (entry.score / 20) * 100;
-            return (
-              <div key={s.id} style={{ padding: "16px 18px", borderBottom: "1px solid var(--border-subtle)", display: "flex", flexDirection: "column", gap: 11 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                  <div className="mono" style={{ fontSize: 12, color: "var(--text-faint)" }}>{"0" + (k + 1)}</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: "1 1 180px" }}>
-                    <div style={{ fontSize: 14, fontWeight: 500 }}>{s.name}</div>
-                    <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>{s.note}</div>
-                  </div>
-                  <div
-                    className="badge"
-                    style={{
-                      background: k === 0 ? "var(--green-tint)" : "var(--fill-neutral)",
-                      color: k === 0 ? "var(--green-ink)" : "var(--text-faint)",
-                    }}
-                  >
-                    {k === 0 ? "PROPOSTA" : "IN ATTESA"}
-                  </div>
-                  <div className="mono" style={{ fontSize: 18, fontWeight: 500, textAlign: "right" }}>
-                    {dec(entry.score, 1)}
-                  </div>
+          {ranking.map((entry, k) => (
+            <div key={entry.strategyId} style={{ padding: "16px 18px", borderBottom: "1px solid var(--border-subtle)", display: "flex", flexDirection: "column", gap: 11 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <div className="mono" style={{ fontSize: 12, color: "var(--text-faint)" }}>{"0" + (k + 1)}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: "1 1 180px" }}>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>{entry.name}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>{entry.note}</div>
                 </div>
-                <div style={{ height: 6, borderRadius: 4, background: "#f0f0ec", overflow: "hidden" }}>
-                  <div style={{ height: 6, borderRadius: 4, width: `${barW}%`, background: k === 0 ? "var(--accent)" : "#dcdbd5" }} />
+                <div
+                  className="badge"
+                  style={{
+                    background: k === 0 ? "var(--green-tint)" : "var(--fill-neutral)",
+                    color: k === 0 ? "var(--green-ink)" : "var(--text-faint)",
+                  }}
+                >
+                  {k === 0 ? "PROPOSTA" : "IN ATTESA"}
+                </div>
+                <div className="mono" style={{ fontSize: 18, fontWeight: 500, textAlign: "right" }}>
+                  {entry.scoreLabel}
                 </div>
               </div>
-            );
-          })}
+              <div style={{ height: 6, borderRadius: 4, background: "#f0f0ec", overflow: "hidden" }}>
+                <div style={{ height: 6, borderRadius: 4, width: `${entry.barPct}%`, background: k === 0 ? "var(--accent)" : "#dcdbd5" }} />
+              </div>
+            </div>
+          ))}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -62,11 +127,8 @@ export function DebriefView() {
             <div className="mono" style={{ fontSize: 10, letterSpacing: "0.13em", color: "var(--green-ink)" }}>
               PROPOSTA PER OGGI
             </div>
-            <div style={{ fontSize: 21, fontWeight: 500, letterSpacing: "-0.015em" }}>{best.name}</div>
-            <div style={{ fontSize: 12.5, color: "var(--text-secondary-2)", lineHeight: 1.5 }}>
-              {best.note} Netto più alto sulle ultime 20 sedute: {money(BACKTEST_ORDER[0].net)} $ dopo i costi, Sharpe{" "}
-              {dec(best.backtest.sharpe, 2)}.
-            </div>
+            <div style={{ fontSize: 21, fontWeight: 500, letterSpacing: "-0.015em" }}>{proposedName}</div>
+            <div style={{ fontSize: 12.5, color: "var(--text-secondary-2)", lineHeight: 1.5 }}>{proposalLine}</div>
             <div
               style={{
                 display: "grid",
@@ -87,6 +149,9 @@ export function DebriefView() {
                 </div>
               </div>
             </div>
+            {(!hasRealRanking || true) && (
+              <div style={{ fontSize: 10.5, color: "var(--text-faint)" }}>Confidenza e regime VIX: ancora simulati, non calcolati sul reale.</div>
+            )}
             <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
               <div
                 className={`btn-primary${isConfirmed ? " confirmed" : ""}`}
@@ -98,7 +163,7 @@ export function DebriefView() {
               >
                 {isConfirmed ? "Attiva sul conto reale ✓" : "Conferma e attiva"}
               </div>
-              <div className="btn-secondary" style={{ flex: "0 1 auto", padding: "11px 14px" }} onClick={() => navigate(`/strategie/${best.id}`)}>
+              <div className="btn-secondary" style={{ flex: "0 1 auto", padding: "11px 14px" }} onClick={() => navigate(`/strategie/${proposedId}`)}>
                 Scegli un'altra
               </div>
             </div>

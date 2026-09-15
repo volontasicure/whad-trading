@@ -3,6 +3,7 @@ import type { LiveMarketData, PnlMode, RealLabOverrides } from "../data/mockData
 import { FALLBACK_LIVE_MARKET_DATA, SESSION_RULES, buildLiveMarketData, mergeRealLabData } from "../data/mockData";
 import { fetchLiveQuotes } from "../lib/marketQuotes";
 import { fetchLabPositions } from "../lib/labPositions";
+import { confirmDebrief, fetchDebrief, type RealDebrief } from "../lib/debrief";
 
 const PNL_MODE_KEY = "whad.pnlMode";
 const QUOTES_POLL_MS = 20_000;
@@ -23,6 +24,8 @@ interface AppStateValue {
   marketSource: MarketDataSource;
   /** Strategie con posizioni reali (lab_positions) attualmente disponibili — vuoto finché nessun tick ha girato. */
   realLabStrategies: RealLabOverrides;
+  /** Classifica/proposta/storico reali del debriefing (GET /api/debrief) — null finché non disponibili, le view ricadono sui dati finti. */
+  realDebrief: RealDebrief | null;
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);
@@ -39,6 +42,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [quoteMarket, setQuoteMarket] = useState<LiveMarketData>(FALLBACK_LIVE_MARKET_DATA);
   const [marketSource, setMarketSource] = useState<MarketDataSource>("loading");
   const [realLabData, setRealLabData] = useState<RealLabOverrides>({});
+  const [realDebrief, setRealDebrief] = useState<RealDebrief | null>(null);
   const cancelledRef = useRef(false);
   const labCancelledRef = useRef(false);
 
@@ -96,6 +100,20 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchDebrief()
+      .then((real) => {
+        if (!cancelled) setRealDebrief(real);
+      })
+      .catch(() => {
+        // Endpoint non disponibile o nessuno storico ancora: resta sui dati finti in DebriefView/HistoryView.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const liveMarket = useMemo(() => mergeRealLabData(quoteMarket, realLabData), [quoteMarket, realLabData]);
 
   const setPnlMode = (mode: PnlMode) => {
@@ -107,7 +125,22 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const confirmChoice = () => {
+  /**
+   * Se il debriefing reale è disponibile, la conferma viene scritta sul server (persiste,
+   * sopravvive al refresh — usata stasera da eod-close.ts per lo storico). Se non lo è
+   * (endpoint non raggiungibile, dev senza DB) ricade sullo stato locale di sempre, che si
+   * perde al refresh ma tiene comunque utilizzabile la UI.
+   */
+  const confirmChoice = async () => {
+    if (realDebrief) {
+      try {
+        const { confirmedAt: serverConfirmedAt } = await confirmDebrief();
+        setRealDebrief((prev) => (prev ? { ...prev, confirmedAt: serverConfirmedAt } : prev));
+        return;
+      } catch {
+        // Scrittura fallita: ricadi sul fallback locale sotto, invece di lasciare il bottone senza effetto.
+      }
+    }
     setConfirmed(true);
     setConfirmedAt(
       new Date().toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })
@@ -118,8 +151,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     () => ({
       pnlMode,
       setPnlMode,
-      confirmed,
-      confirmedAt,
+      confirmed: realDebrief ? realDebrief.confirmedAt != null : confirmed,
+      confirmedAt: realDebrief ? realDebrief.confirmedAt : confirmedAt,
       confirmChoice,
       now,
       eodAutoClose: SESSION_RULES.closeProfitableAtEod,
@@ -127,8 +160,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       liveMarket,
       marketSource,
       realLabStrategies: realLabData,
+      realDebrief,
     }),
-    [pnlMode, confirmed, confirmedAt, now, liveMarket, marketSource, realLabData]
+    [pnlMode, confirmed, confirmedAt, now, liveMarket, marketSource, realLabData, realDebrief]
   );
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;

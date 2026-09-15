@@ -46,14 +46,35 @@ CREATE TABLE IF NOT EXISTS lab_state (
   PRIMARY KEY (strategy_id, trading_date, key)
 );
 
--- Storico sedute reale (sostituirà a regime i dati finti in mockData.ts).
+-- Storico sedute reale (sostituisce i dati finti SESSIONS in mockData.ts). Una riga per
+-- giorno, scritta una sola volta a fine giornata da api/cron/eod-close.ts: strategy_id è
+-- la proposta del debriefing di quel mattino (la meglio classificata sul netto reale delle
+-- sedute precedenti), net/trades sono il risultato REALE di quel lab quel giorno — non c'è
+-- ancora un conto reale eseguito (vedi CLAUDE.md "Prossimi passi" #2), quindi "storico
+-- reale" qui significa "il lab che sarebbe stato scelto e come è andato davvero", non
+-- l'esito di ordini reali piazzati. costs è sempre 0: le strategie non modellano commissioni
+-- separate dal realized_pnl (limite noto, non ancora affrontato).
 CREATE TABLE IF NOT EXISTS sessions (
   trading_date DATE PRIMARY KEY,
   strategy_id TEXT NOT NULL,
   net NUMERIC NOT NULL,
   deviation_pct NUMERIC NOT NULL,
   trades INTEGER NOT NULL,
-  costs NUMERIC NOT NULL
+  costs NUMERIC NOT NULL,
+  -- Quando l'utente ha cliccato "Conferma e attiva" quel mattino (da debrief_confirmations),
+  -- NULL se non confermato esplicitamente quel giorno.
+  confirmed_at TIMESTAMPTZ
+);
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
+
+-- Conferma del debriefing del mattino, scritta da POST /api/debrief quando l'utente clicca
+-- "Conferma e attiva". Tabella separata (non una colonna diretta su sessions) perché la
+-- conferma arriva al mattino, mentre la riga di sessions per quel giorno viene scritta solo
+-- a fine giornata da eod-close.ts — a quel punto legge da qui per riportare confirmed_at.
+CREATE TABLE IF NOT EXISTS debrief_confirmations (
+  trading_date DATE PRIMARY KEY,
+  confirmed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Log di ogni invocazione del tick, per verificare che lo scheduler GitHub Actions funzioni davvero.
