@@ -18,12 +18,20 @@ CREATE TABLE IF NOT EXISTS lab_positions (
   -- Stop/target dell'ORB, sulla riga e non in una cache per data: una posizione che
   -- sopravvive oltre la giornata in cui è stata aperta non deve mai perderli.
   stop_price NUMERIC,
-  target_price NUMERIC
+  target_price NUMERIC,
+  -- Perché è stata chiusa: 'stop' | 'target' | 'stop_loss' | 'max_hold' | 'exit_target' | 'eod'
+  -- (valori esatti per strategia in server/{orb,vwapReversion,pairsTrading}.ts#ExitDecision;
+  -- 'eod' per le chiusure della rete di sicurezza generica/coppie, che non hanno un reason
+  -- proprio). NULL per le posizioni ancora aperte. Diagnostica: senza questo, "3 chiuse,
+  -- P&L -161" non dice se erano 3 stop o 3 target — non si distingue un filtro d'ingresso
+  -- troppo permissivo (tanti stop) da normale rumore.
+  exit_reason TEXT
 );
 
 ALTER TABLE lab_positions ADD COLUMN IF NOT EXISTS pair_key TEXT;
 ALTER TABLE lab_positions ADD COLUMN IF NOT EXISTS stop_price NUMERIC;
 ALTER TABLE lab_positions ADD COLUMN IF NOT EXISTS target_price NUMERIC;
+ALTER TABLE lab_positions ADD COLUMN IF NOT EXISTS exit_reason TEXT;
 
 CREATE INDEX IF NOT EXISTS lab_positions_strategy_status_idx ON lab_positions (strategy_id, status);
 CREATE INDEX IF NOT EXISTS lab_positions_pair_key_idx ON lab_positions (pair_key) WHERE pair_key IS NOT NULL;
@@ -86,3 +94,20 @@ CREATE TABLE IF NOT EXISTS session_bars (
   vwap NUMERIC NOT NULL,
   PRIMARY KEY (symbol, bar_time)
 );
+
+-- Z-score intraday di ogni coppia candidata del giorno (non solo quelle che superano
+-- ENTRY_Z), scritto ad ogni tick da api/cron/tick.ts. Diagnostica per pairs trading: senza
+-- questo, un giorno senza nuovi ingressi non dice se le coppie sfioravano la soglia di 2,0
+-- senza mai superarla, o se erano semplicemente poco correlate in pratica — due problemi
+-- diversi con rimedi diversi (soglia troppo alta vs selezione delle coppie da rivedere).
+CREATE TABLE IF NOT EXISTS pairs_zscore_log (
+  id SERIAL PRIMARY KEY,
+  trading_date DATE NOT NULL,
+  pair_key TEXT NOT NULL,
+  symbol_a TEXT NOT NULL,
+  symbol_b TEXT NOT NULL,
+  z NUMERIC NOT NULL,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS pairs_zscore_log_date_pair_idx ON pairs_zscore_log (trading_date, pair_key);

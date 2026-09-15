@@ -133,15 +133,44 @@ async function printTodayPerformance(tradingDate: string): Promise<string[]> {
     [session.openUtc]
   )) as { strategy_id: string; pnl: number; trades: number }[];
 
+  // Diagnostica: scomposizione delle chiusure per motivo (stop vs target vs eod, ecc.) — senza
+  // questo "N chiuse, P&L X" non dice se X viene da un filtro d'ingresso troppo permissivo
+  // (tanti stop) o da normale rumore. Vedi ExitDecision in server/{orb,vwapReversion,pairsTrading}.ts.
+  const reasonRows = (await sql.query(
+    `SELECT strategy_id, coalesce(exit_reason, 'n/d') AS reason, count(*)::int AS n
+     FROM lab_positions WHERE status = 'closed' AND exit_time >= $1 GROUP BY strategy_id, reason`,
+    [session.openUtc]
+  )) as { strategy_id: string; reason: string; n: number }[];
+  const reasonsByStrategy: Record<string, string> = {};
+  for (const id of [ORB_STRATEGY_ID, VWAP_STRATEGY_ID, PAIRS_STRATEGY_ID]) {
+    const rows = reasonRows.filter((r) => r.strategy_id === id);
+    if (rows.length > 0) reasonsByStrategy[id] = rows.map((r) => `${r.reason} ${r.n}`).join(", ");
+  }
+
   console.log("\nPerformance di oggi:");
   const lines: string[] = [];
   for (const id of [ORB_STRATEGY_ID, VWAP_STRATEGY_ID, PAIRS_STRATEGY_ID]) {
     const row = perf.find((p) => p.strategy_id === id);
     const openNow = id === PAIRS_STRATEGY_ID ? `${pairsLegsOpen} gambe aperte` : `${countByStrategy[id] ?? 0} aperte`;
-    const line = `${STRATEGY_LABELS[id]}: ${row?.trades ?? 0} chiuse, P&L ${row?.pnl ?? 0} | ${openNow}`;
+    const reasons = reasonsByStrategy[id];
+    const line = `${STRATEGY_LABELS[id]}: ${row?.trades ?? 0} chiuse${reasons ? ` (${reasons})` : ""}, P&L ${row?.pnl ?? 0} | ${openNow}`;
     console.log(`  ${line}`);
     lines.push(line);
   }
+
+  // Diagnostica pairs trading: z-score massimo raggiunto oggi per coppia candidata, anche per
+  // quelle mai entrate — distingue "soglia (2.0) sfiorata" da "coppie poco correlate in pratica".
+  const zRows = (await sql.query(
+    `SELECT pair_key, max(abs(z))::float8 AS max_abs_z
+     FROM pairs_zscore_log WHERE trading_date = $1 GROUP BY pair_key ORDER BY max_abs_z DESC LIMIT 5`,
+    [tradingDate]
+  )) as { pair_key: string; max_abs_z: number }[];
+  if (zRows.length > 0) {
+    const zLine = `Pairs — z massimo oggi per coppia (soglia ingresso 2.0): ${zRows.map((r) => `${r.pair_key} ${r.max_abs_z.toFixed(2)}`).join(", ")}`;
+    console.log(`  ${zLine}`);
+    lines.push(zLine);
+  }
+
   return lines;
 }
 

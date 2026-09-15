@@ -19,6 +19,7 @@ import {
 import {
   MAX_PAIRS,
   STRATEGY_ID as PAIRS_STRATEGY_ID,
+  currentZ,
   decideEntries as decidePairsEntries,
   decideExits as decidePairsExits,
   decidePairsEodCloses,
@@ -330,6 +331,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (const p of pairStats) pairStatsByKey[pairKey(p.a, p.b)] = p;
     const pairsExits = decidePairsExits(pairsOpen, prices, pairStatsByKey);
 
+    // Diagnostica: z-score di ogni coppia candidata del giorno, non solo quelle che entrano —
+    // senza questo un giorno senza nuovi ingressi non distingue "soglia sfiorata" da "coppie
+    // poco correlate". Best-effort: non deve mai bloccare il tick.
+    await persistBarsBestEffort("pairs_zscore", async () => {
+      await Promise.all(
+        pairStats.map(async (p) => {
+          const priceA = prices[p.a];
+          const priceB = prices[p.b];
+          if (priceA == null || priceB == null) return;
+          const z = currentZ(priceA, priceB, p);
+          if (z == null) return;
+          await db()`
+            INSERT INTO pairs_zscore_log (trading_date, pair_key, symbol_a, symbol_b, z)
+            VALUES (${tradingDate}, ${pairKey(p.a, p.b)}, ${p.a}, ${p.b}, ${z})
+          `;
+        })
+      );
+    });
+
     // Raffreddamento post-stop: una coppia il cui z-score resta stabilmente oltre STOP_Z
     // (relazione rotta per davvero, non rumore) va altrimenti in stop e rientra al tick
     // successivo all'infinito — trovato con un backtest su dati storici reali (46 stop in
@@ -346,10 +366,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Applica le uscite di ogni strategia.
     for (const exit of vwapExits) {
-      await db()`UPDATE lab_positions SET status='closed', exit_price=${exit.exitPrice}, exit_time=${now.toISOString()}, realized_pnl=${exit.realizedPnl} WHERE id=${exit.position.id}`;
+      await db()`UPDATE lab_positions SET status='closed', exit_price=${exit.exitPrice}, exit_time=${now.toISOString()}, realized_pnl=${exit.realizedPnl}, exit_reason=${exit.reason} WHERE id=${exit.position.id}`;
     }
     for (const exit of orbExits) {
-      await db()`UPDATE lab_positions SET status='closed', exit_price=${exit.exitPrice}, exit_time=${now.toISOString()}, realized_pnl=${exit.realizedPnl} WHERE id=${exit.position.id}`;
+      await db()`UPDATE lab_positions SET status='closed', exit_price=${exit.exitPrice}, exit_time=${now.toISOString()}, realized_pnl=${exit.realizedPnl}, exit_reason=${exit.reason} WHERE id=${exit.position.id}`;
     }
     for (const exit of pairsExits) {
       for (const legId of exit.legIds) {
@@ -358,7 +378,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (!leg || price == null) continue;
         const dir = leg.side === "LONG" ? 1 : -1;
         const legPnl = Math.round(leg.qty * (price - leg.entryPrice) * dir);
-        await db()`UPDATE lab_positions SET status='closed', exit_price=${price}, exit_time=${now.toISOString()}, realized_pnl=${legPnl} WHERE id=${legId}`;
+        await db()`UPDATE lab_positions SET status='closed', exit_price=${price}, exit_time=${now.toISOString()}, realized_pnl=${legPnl}, exit_reason=${exit.reason} WHERE id=${legId}`;
       }
     }
 
@@ -423,7 +443,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         .map((r) => ({ id: r.id, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price }));
       const singleCloses = decideLabEodCloses(singleRows, prices);
       for (const c of singleCloses) {
-        await db()`UPDATE lab_positions SET status='closed', exit_price=${c.exitPrice}, exit_time=${now.toISOString()}, realized_pnl=${c.realizedPnl} WHERE id=${c.id}`;
+        await db()`UPDATE lab_positions SET status='closed', exit_price=${c.exitPrice}, exit_time=${now.toISOString()}, realized_pnl=${c.realizedPnl}, exit_reason='eod' WHERE id=${c.id}`;
       }
 
       const pairLegRows: OpenLeg[] = remainingRows
@@ -438,7 +458,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           if (!leg || price == null) continue;
           const dir = leg.side === "LONG" ? 1 : -1;
           const legPnl = Math.round(leg.qty * (price - leg.entryPrice) * dir);
-          await db()`UPDATE lab_positions SET status='closed', exit_price=${price}, exit_time=${now.toISOString()}, realized_pnl=${legPnl} WHERE id=${legId}`;
+          await db()`UPDATE lab_positions SET status='closed', exit_price=${price}, exit_time=${now.toISOString()}, realized_pnl=${legPnl}, exit_reason='eod' WHERE id=${legId}`;
           pairLegsClosed++;
         }
       }
