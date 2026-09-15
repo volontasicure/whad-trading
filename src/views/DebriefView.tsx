@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { Header } from "../components/Header";
+import { StatusBadge } from "../components/StatusBadge";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
 import { BACKTEST_ORDER, BEST_STRATEGY_INDEX, DEBRIEF, STRATEGIES, dec, money } from "../data/mockData";
@@ -16,7 +17,7 @@ interface DisplayRankEntry {
 
 export function DebriefView() {
   const navigate = useNavigate();
-  const { confirmed, autoConfirm, confirmChoice, realDebrief } = useAppState();
+  const { confirmed, autoConfirm, confirmChoice, realDebrief, debriefSource } = useAppState();
 
   const isConfirmed = confirmed || autoConfirm;
   const hasRealRanking = Boolean(realDebrief && realDebrief.sessionsUsed > 0 && realDebrief.proposedStrategyId);
@@ -76,21 +77,18 @@ export function DebriefView() {
           <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--border-divider)", display: "flex", flexDirection: "column", gap: 3 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div style={{ fontSize: 15, fontWeight: 500 }}>Classifica del debriefing</div>
-              <div
-                className="mono"
-                title={hasRealRanking ? "Netto reale da lab_positions" : "Nessuno storico reale ancora: classifica su backtest finto"}
-                style={{
-                  fontSize: 8.5,
-                  letterSpacing: "0.08em",
-                  padding: "2px 5px",
-                  borderRadius: 4,
-                  whiteSpace: "nowrap",
-                  background: hasRealRanking ? "var(--green-tint)" : "var(--fill-neutral)",
-                  color: hasRealRanking ? "var(--green-ink)" : "var(--text-faint)",
-                }}
-              >
-                {hasRealRanking ? "REALE" : "SIMULATO"}
-              </div>
+              <StatusBadge
+                status={debriefSource}
+                title={
+                  debriefSource === "offline"
+                    ? "/api/debrief non raggiungibile: classifica su backtest finto"
+                    : debriefSource === "loading"
+                      ? "Prima lettura della classifica in corso"
+                      : hasRealRanking
+                        ? "Netto reale da lab_positions"
+                        : "Nessuno storico reale ancora: classifica su backtest finto"
+                }
+              />
             </div>
             <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>{basisLine}</div>
           </div>

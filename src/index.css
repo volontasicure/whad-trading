@@ -94,6 +94,10 @@ button {
   animation: livePulse 2.4s ease-in-out infinite;
 }
 
+.dot-muted {
+  background: var(--text-faint);
+}
+
 .card {
   background: var(--bg-surface);
   border: 1px solid var(--border-main);

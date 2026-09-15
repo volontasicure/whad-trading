@@ -2,8 +2,10 @@ import { dec, pnlColor } from "../data/mockData";
 import { useAppState } from "../context/AppState";
 
 export function TickerTape() {
-  const { liveMarket } = useAppState();
+  const { liveMarket, marketClock } = useAppState();
   const tapeItems = [...liveMarket.market, ...liveMarket.market];
+  // null/true finché non sappiamo per certo che è chiuso: resta "LIVE", niente falsi negativi.
+  const isClosed = marketClock.isOpen === false;
   return (
     <div
       style={{
@@ -28,9 +30,9 @@ export function TickerTape() {
           flex: "0 0 auto",
         }}
       >
-        <div className="dot dot-live" />
+        <div className={`dot ${isClosed ? "dot-muted" : "dot-live"}`} />
         <div className="mono" style={{ fontSize: 9.5, letterSpacing: "0.12em", color: "var(--text-faint)" }}>
-          LIVE
+          {isClosed ? "MERCATO CHIUSO" : "LIVE"}
         </div>
       </div>
       <div style={{ overflow: "hidden", flex: "1 1 auto", minWidth: 0, height: "100%", display: "flex", alignItems: "center" }}>

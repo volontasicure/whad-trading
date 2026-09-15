@@ -1,5 +1,13 @@
 export type Side = "LONG" | "SHORT" | "FLAT";
 
+/**
+ * Stato di una fonte dati reale, per i badge di stato nella UI:
+ * "loading" primo fetch in corso, "live" dati reali ricevuti, "mock" fetch riuscito ma
+ * nessun dato reale disponibile ancora (es. nessuno storico, nessuna posizione — fallback
+ * legittimo), "offline" il fetch stesso è fallito (endpoint irraggiungibile).
+ */
+export type DataStatus = "loading" | "live" | "mock" | "offline";
+
 export interface Instrument {
   symbol: string;
   name: string;

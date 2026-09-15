@@ -2,8 +2,10 @@ import { useNavigate } from "react-router-dom";
 import { Header } from "../components/Header";
 import { PnlModeToggle } from "../components/PnlModeToggle";
 import { Sparkline } from "../components/Sparkline";
+import { StatusBadge } from "../components/StatusBadge";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
+import type { DataStatus } from "../types";
 import {
   STRATEGIES,
   dec,
@@ -16,7 +18,7 @@ import {
 
 export function LabView() {
   const navigate = useNavigate();
-  const { pnlMode, eodAutoClose, liveMarket, realLabStrategies } = useAppState();
+  const { pnlMode, eodAutoClose, liveMarket, realLabStrategies, labPositionsSource } = useAppState();
   const { book, strategySums, equityCurves, todayRank, positionsToClose } = liveMarket;
 
   return (
@@ -30,6 +32,20 @@ export function LabView() {
             const rank = todayRank[i];
             const net = sum.unrealized + sum.realized;
             const hasRealData = Boolean(realLabStrategies[s.id]);
+            const status: DataStatus =
+              labPositionsSource === "loading" || labPositionsSource === "offline"
+                ? labPositionsSource
+                : hasRealData
+                  ? "live"
+                  : "mock";
+            const statusTitle =
+              status === "offline"
+                ? "/api/lab/positions non raggiungibile: dati simulati"
+                : status === "loading"
+                  ? "Prima lettura delle posizioni in corso"
+                  : status === "live"
+                    ? "Posizioni reali da lab_positions"
+                    : "Nessuna posizione reale ancora: dati simulati";
             return (
               <div key={s.id} className="card" style={{ padding: "16px 16px 14px", display: "flex", flexDirection: "column", gap: 14 }}>
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 100 }}>
@@ -38,21 +54,7 @@ export function LabView() {
                       <div className="mono" style={{ fontSize: 10, letterSpacing: "0.13em", color: "var(--text-faint)" }}>
                         {s.code}
                       </div>
-                      <div
-                        className="mono"
-                        title={hasRealData ? "Posizioni reali da lab_positions" : "Nessuna posizione reale ancora: dati simulati"}
-                        style={{
-                          fontSize: 8.5,
-                          letterSpacing: "0.08em",
-                          padding: "2px 5px",
-                          borderRadius: 4,
-                          whiteSpace: "nowrap",
-                          background: hasRealData ? "var(--green-tint)" : "var(--fill-neutral)",
-                          color: hasRealData ? "var(--green-ink)" : "var(--text-faint)",
-                        }}
-                      >
-                        {hasRealData ? "REALE" : "SIMULATO"}
-                      </div>
+                      <StatusBadge status={status} title={statusTitle} />
                     </div>
                     <div style={{ fontSize: 16, fontWeight: 500, letterSpacing: "-0.01em", lineHeight: 1.25 }}>{s.name}</div>
                     <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)", lineHeight: 1.45 }}>{s.logic}</div>

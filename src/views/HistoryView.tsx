@@ -1,4 +1,5 @@
 import { Header } from "../components/Header";
+import { StatusBadge } from "../components/StatusBadge";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
 import { SESSIONS, STRATEGIES, STRATEGY_HISTORY_STATS, dec, money, pnlColor } from "../data/mockData";
@@ -28,8 +29,9 @@ function formatDate(iso: string): string {
 }
 
 export function HistoryView() {
-  const { realDebrief } = useAppState();
+  const { realDebrief, debriefSource } = useAppState();
   const hasRealSessions = Boolean(realDebrief && realDebrief.sessions.length > 0);
+  const status = debriefSource === "loading" || debriefSource === "offline" ? debriefSource : hasRealSessions ? "live" : "mock";
 
   let stats: DisplayHistoryStat[];
   let sessions: DisplaySession[];
@@ -82,21 +84,18 @@ export function HistoryView() {
       <TickerTape />
       <div style={{ padding: "22px 30px 40px", display: "flex", flexDirection: "column", gap: 18 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div
-            className="mono"
-            title={hasRealSessions ? "Sedute reali da sessions" : "Nessuno storico reale ancora: dati simulati"}
-            style={{
-              fontSize: 8.5,
-              letterSpacing: "0.08em",
-              padding: "2px 5px",
-              borderRadius: 4,
-              whiteSpace: "nowrap",
-              background: hasRealSessions ? "var(--green-tint)" : "var(--fill-neutral)",
-              color: hasRealSessions ? "var(--green-ink)" : "var(--text-faint)",
-            }}
-          >
-            {hasRealSessions ? "REALE" : "SIMULATO"}
-          </div>
+          <StatusBadge
+            status={status}
+            title={
+              status === "offline"
+                ? "/api/debrief non raggiungibile: dati simulati"
+                : status === "loading"
+                  ? "Prima lettura dello storico in corso"
+                  : hasRealSessions
+                    ? "Sedute reali da sessions"
+                    : "Nessuno storico reale ancora: dati simulati"
+            }
+          />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 14 }}>
           {stats.map((s) => (

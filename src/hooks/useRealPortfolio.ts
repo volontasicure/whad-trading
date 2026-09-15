@@ -11,7 +11,7 @@ export interface RealPortfolioData {
   executions: Execution[];
 }
 
-export type RealPortfolioSource = "loading" | "live" | "mock";
+export type RealPortfolioSource = "loading" | "live" | "offline";
 
 const POLL_MS = 30_000;
 
@@ -25,9 +25,11 @@ const MOCK_DATA: RealPortfolioData = {
 
 /**
  * Dati reali del conto Alpaca (posizioni, P&L per periodo, esecuzioni).
- * Fallback silenzioso ai dati finti se l'adapter non è raggiungibile.
- * Nota: finché non vengono piazzati ordini reali sul conto paper, posizioni
- * ed esecuzioni risulteranno vuote — è il comportamento atteso, non un bug.
+ * A differenza dei lab, qui non esiste un "nessun dato ancora" legittimo: se il fetch
+ * riesce, anche zero posizioni sono un dato reale (source "live"); "offline" indica solo
+ * che l'adapter non è raggiungibile — a quel punto si vedono i dati finti come segnaposto.
+ * Nota: finché non vengono piazzati ordini reali sul conto paper, posizioni ed esecuzioni
+ * risulteranno comunque vuote anche a source "live" — è il comportamento atteso, non un bug.
  */
 export function useRealPortfolio(): { data: RealPortfolioData; source: RealPortfolioSource } {
   const [data, setData] = useState<RealPortfolioData>(MOCK_DATA);
@@ -68,7 +70,7 @@ export function useRealPortfolio(): { data: RealPortfolioData; source: RealPortf
       } catch {
         if (cancelled) return;
         setData(MOCK_DATA);
-        setSource((s) => (s === "live" ? s : "mock"));
+        setSource("offline");
       }
     };
 

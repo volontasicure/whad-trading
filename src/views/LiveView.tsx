@@ -1,5 +1,6 @@
 import { Header } from "../components/Header";
 import { PnlModeToggle } from "../components/PnlModeToggle";
+import { StatusBadge } from "../components/StatusBadge";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
 import { useRealPortfolio } from "../hooks/useRealPortfolio";
@@ -16,7 +17,7 @@ import {
 
 export function LiveView() {
   const { pnlMode, eodAutoClose, confirmedAt, liveMarket } = useAppState();
-  const { data: real } = useRealPortfolio();
+  const { data: real, source: realSource } = useRealPortfolio();
   const best = STRATEGIES[BEST_STRATEGY_INDEX];
   const labPnl = periodPnlFor(best.code.toLowerCase().replace(" ", "-"));
   const openPositions = real.positions.slice(0, 8);
@@ -36,6 +37,16 @@ export function LiveView() {
               <div className="mono" style={{ fontSize: 10, letterSpacing: "0.13em", color: "var(--green-ink)" }}>
                 IN ESECUZIONE
               </div>
+              <StatusBadge
+                status={realSource === "loading" ? "loading" : realSource === "live" ? "live" : "offline"}
+                title={
+                  realSource === "offline"
+                    ? "Conto Alpaca non raggiungibile: dati segnaposto"
+                    : realSource === "loading"
+                      ? "Prima lettura del conto reale in corso"
+                      : "Dati correnti dal conto Alpaca"
+                }
+              />
             </div>
             <div style={{ fontSize: 18, fontWeight: 500, letterSpacing: "-0.015em", lineHeight: 1.25 }}>{best.name}</div>
             <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>

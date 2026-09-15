@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { ConfirmBanner } from "./components/ConfirmBanner";
 import { Sidebar } from "./components/Sidebar";
 import { AppStateProvider } from "./context/AppState";
 import { LabView } from "./views/LabView";
@@ -26,6 +27,7 @@ export default function App() {
         <div className={`mobile-nav-overlay${navOpen ? " open" : ""}`} onClick={() => setNavOpen(false)} />
         <Sidebar mobileOpen={navOpen} onNavigate={() => setNavOpen(false)} />
         <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", flexDirection: "column" }}>
+          <ConfirmBanner />
           <Routes>
             <Route path="/" element={<Navigate to="/lab" replace />} />
             <Route path="/lab" element={<LabView />} />

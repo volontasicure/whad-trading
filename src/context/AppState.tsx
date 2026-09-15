@@ -4,12 +4,14 @@ import { FALLBACK_LIVE_MARKET_DATA, SESSION_RULES, buildLiveMarketData, mergeRea
 import { fetchLiveQuotes } from "../lib/marketQuotes";
 import { fetchLabPositions } from "../lib/labPositions";
 import { confirmDebrief, fetchDebrief, type RealDebrief } from "../lib/debrief";
+import { useMarketClock } from "../hooks/useMarketClock";
+import type { DataStatus } from "../types";
 
 const PNL_MODE_KEY = "whad.pnlMode";
 const QUOTES_POLL_MS = 20_000;
 const LAB_POSITIONS_POLL_MS = 20_000;
 
-export type MarketDataSource = "loading" | "live" | "mock";
+export type MarketDataSource = "loading" | "live" | "mock" | "offline";
 
 interface AppStateValue {
   pnlMode: PnlMode;
@@ -24,8 +26,14 @@ interface AppStateValue {
   marketSource: MarketDataSource;
   /** Strategie con posizioni reali (lab_positions) attualmente disponibili — vuoto finché nessun tick ha girato. */
   realLabStrategies: RealLabOverrides;
+  /** Stato del fetch di /api/lab/positions (non delle singole strategie: quello è realLabStrategies). */
+  labPositionsSource: DataStatus;
   /** Classifica/proposta/storico reali del debriefing (GET /api/debrief) — null finché non disponibili, le view ricadono sui dati finti. */
   realDebrief: RealDebrief | null;
+  /** Stato del fetch di /api/debrief: "mock" = endpoint raggiunto ma nessuno storico ancora. */
+  debriefSource: DataStatus;
+  /** Orario di mercato reale (per il badge MERCATO CHIUSO e il banner di conferma mancante). */
+  marketClock: { isOpen: boolean | null; source: DataStatus };
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);
@@ -42,7 +50,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [quoteMarket, setQuoteMarket] = useState<LiveMarketData>(FALLBACK_LIVE_MARKET_DATA);
   const [marketSource, setMarketSource] = useState<MarketDataSource>("loading");
   const [realLabData, setRealLabData] = useState<RealLabOverrides>({});
+  const [labPositionsSource, setLabPositionsSource] = useState<DataStatus>("loading");
   const [realDebrief, setRealDebrief] = useState<RealDebrief | null>(null);
+  const [debriefSource, setDebriefSource] = useState<DataStatus>("loading");
+  const marketClock = useMarketClock();
   const cancelledRef = useRef(false);
   const labCancelledRef = useRef(false);
 
@@ -59,15 +70,17 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         const quotes = await fetchLiveQuotes();
         if (cancelledRef.current) return;
         if (Object.keys(quotes).length === 0) {
-          // Nessuna quotazione utilizzabile (es. mercato mai aperto oggi): resta sul fallback.
-          setMarketSource((s) => (s === "loading" ? "mock" : s));
+          // Nessuna quotazione utilizzabile (es. mercato mai aperto oggi): resta sul fallback, non è un errore.
+          setMarketSource((s) => (s === "live" ? s : "mock"));
           return;
         }
         setQuoteMarket(buildLiveMarketData(quotes));
         setMarketSource("live");
       } catch {
+        // Fetch fallito per davvero (non solo "nessuna quotazione"): segnala offline invece di
+        // restare silenziosamente su un "live" ormai stantio o confonderlo con un mock legittimo.
         if (cancelledRef.current) return;
-        setMarketSource((s) => (s === "live" ? s : "mock"));
+        setMarketSource("offline");
       }
     };
 
@@ -87,8 +100,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         const real = await fetchLabPositions();
         if (labCancelledRef.current) return;
         setRealLabData(real);
+        setLabPositionsSource("live");
       } catch {
-        // Endpoint non disponibile (dev senza vercel dev, o nessun tick ha ancora girato): resta sulla simulazione.
+        // Endpoint non raggiungibile (dev senza vercel dev, o problema reale): offline, non "nessun dato ancora".
+        if (labCancelledRef.current) return;
+        setLabPositionsSource("offline");
       }
     };
 
@@ -104,10 +120,14 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     fetchDebrief()
       .then((real) => {
-        if (!cancelled) setRealDebrief(real);
+        if (cancelled) return;
+        setRealDebrief(real);
+        setDebriefSource(real.sessionsUsed > 0 ? "live" : "mock");
       })
       .catch(() => {
-        // Endpoint non disponibile o nessuno storico ancora: resta sui dati finti in DebriefView/HistoryView.
+        // Endpoint non raggiungibile per davvero: offline. Le view ricadono sui dati finti.
+        if (cancelled) return;
+        setDebriefSource("offline");
       });
     return () => {
       cancelled = true;
@@ -160,9 +180,24 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       liveMarket,
       marketSource,
       realLabStrategies: realLabData,
+      labPositionsSource,
       realDebrief,
+      debriefSource,
+      marketClock,
     }),
-    [pnlMode, confirmed, confirmedAt, now, liveMarket, marketSource, realLabData, realDebrief]
+    [
+      pnlMode,
+      confirmed,
+      confirmedAt,
+      now,
+      liveMarket,
+      marketSource,
+      realLabData,
+      labPositionsSource,
+      realDebrief,
+      debriefSource,
+      marketClock,
+    ]
   );
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;
