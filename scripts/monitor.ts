@@ -6,8 +6,10 @@
 // visibile a colpo d'occhio anche senza aprire la mail). Parte 3 (avviare un fix dalla
 // mail) non ancora implementata.
 //
-// Si ferma da solo se il mercato non è realmente aperto in questo momento (stesso
-// /v2/clock usato da api/cron/tick.ts) — non dipende dalla sola finestra oraria del cron.
+// A mercato chiuso (stesso /v2/clock usato da api/cron/tick.ts, non solo la finestra oraria
+// del cron) salta le anomalie che assumono mercato aperto (freschezza tick, tetti posizioni),
+// ma stampa comunque "Performance di oggi" — così il risultato della giornata resta leggibile
+// anche dopo la chiusura, non solo mentre il mercato è ancora aperto.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -109,15 +111,54 @@ async function sendAlertEmail(perfSummary: string[]): Promise<void> {
   }
 }
 
+/**
+ * Riepilogo chiuse/P&L/aperte per le 3 strategie sulla trading_date data — non dipende dal
+ * mercato aperto (legge solo posizioni già chiuse più il conteggio di quelle ancora aperte),
+ * quindi funziona anche a mercato chiuso per leggere il risultato finale della giornata.
+ */
+async function printTodayPerformance(tradingDate: string): Promise<string[]> {
+  const openCounts = (await sql.query(
+    `SELECT strategy_id, count(*)::int AS n FROM lab_positions WHERE status = 'open' GROUP BY strategy_id`
+  )) as { strategy_id: string; n: number }[];
+  const countByStrategy: Record<string, number> = {};
+  for (const row of openCounts) countByStrategy[row.strategy_id] = row.n;
+  const pairsLegsOpen = countByStrategy[PAIRS_STRATEGY_ID] ?? 0;
+
+  const session = await fetchMarketSession(tradingDate);
+  if (!session) return [];
+
+  const perf = (await sql.query(
+    `SELECT strategy_id, coalesce(sum(realized_pnl), 0)::float8 AS pnl, count(*)::int AS trades
+     FROM lab_positions WHERE status = 'closed' AND exit_time >= $1 GROUP BY strategy_id`,
+    [session.openUtc]
+  )) as { strategy_id: string; pnl: number; trades: number }[];
+
+  console.log("\nPerformance di oggi:");
+  const lines: string[] = [];
+  for (const id of [ORB_STRATEGY_ID, VWAP_STRATEGY_ID, PAIRS_STRATEGY_ID]) {
+    const row = perf.find((p) => p.strategy_id === id);
+    const openNow = id === PAIRS_STRATEGY_ID ? `${pairsLegsOpen} gambe aperte` : `${countByStrategy[id] ?? 0} aperte`;
+    const line = `${STRATEGY_LABELS[id]}: ${row?.trades ?? 0} chiuse, P&L ${row?.pnl ?? 0} | ${openNow}`;
+    console.log(`  ${line}`);
+    lines.push(line);
+  }
+  return lines;
+}
+
 async function run() {
   const clock = await alpacaFetch<AlpacaClock>("/v2/clock");
+  const now = new Date();
+  const tradingDate = now.toISOString().slice(0, 10);
+
   if (!clock.is_open) {
-    console.log(`Mercato chiuso (prossima apertura ${clock.next_open}), nessun controllo da fare.`);
+    console.log(`Mercato chiuso (prossima apertura ${clock.next_open}).`);
+    // Le anomalie sotto (freschezza tick, tetti posizioni, gambe orfane) assumono mercato
+    // aperto e non hanno senso fuori orario — ma il risultato della giornata resta leggibile
+    // anche a mercato chiuso, quindi lo stampiamo comunque invece di uscire a mani vuote.
+    await printTodayPerformance(tradingDate);
     return;
   }
 
-  const now = new Date();
-  const tradingDate = now.toISOString().slice(0, 10);
   console.log(`Mercato aperto — controllo alle ${now.toISOString()}\n`);
 
   // --- Freschezza del tick: il tick principale gira ogni 5 minuti in orario di mercato ---
@@ -178,22 +219,7 @@ async function run() {
   }
 
   // --- Performance di oggi per strategia (informativo, non un'anomalia) ---
-  const session = await fetchMarketSession(tradingDate);
-  if (session) {
-    const perf = (await sql.query(
-      `SELECT strategy_id, coalesce(sum(realized_pnl), 0)::float8 AS pnl, count(*)::int AS trades
-       FROM lab_positions WHERE status = 'closed' AND exit_time >= $1 GROUP BY strategy_id`,
-      [session.openUtc]
-    )) as { strategy_id: string; pnl: number; trades: number }[];
-    console.log("\nPerformance di oggi:");
-    for (const id of [ORB_STRATEGY_ID, VWAP_STRATEGY_ID, PAIRS_STRATEGY_ID]) {
-      const row = perf.find((p) => p.strategy_id === id);
-      const openNow = id === PAIRS_STRATEGY_ID ? `${pairsLegsOpen} gambe aperte` : `${countByStrategy[id] ?? 0} aperte`;
-      const line = `${STRATEGY_LABELS[id]}: ${row?.trades ?? 0} chiuse, P&L ${row?.pnl ?? 0} | ${openNow}`;
-      console.log(`  ${line}`);
-      perfLines.push(line);
-    }
-  }
+  perfLines.push(...(await printTodayPerformance(tradingDate)));
 
   console.log(`\nAnomalie rilevate: ${anomalies.length}`);
   for (const a of anomalies) {
