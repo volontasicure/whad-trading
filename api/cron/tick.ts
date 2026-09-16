@@ -94,6 +94,28 @@ async function fetchPrices(): Promise<Record<string, number>> {
 }
 
 /**
+ * Con molti simboli e molti giorni la risposta multi-simbolo di Alpaca non entra in una
+ * sola pagina: torna solo un sottoinsieme di simboli/barre più un next_page_token. Senza
+ * seguire la paginazione fino in fondo, metà dei simboli risultano silenziosamente senza
+ * barre — scoperto allargando l'universo da 20 a 40 titoli (prima, con 20, capitava sempre
+ * in una pagina sola).
+ */
+async function fetchBarsPaginated<T>(basePath: string): Promise<Record<string, T[]>> {
+  const merged: Record<string, T[]> = {};
+  let pageToken: string | null = null;
+  for (;;) {
+    const path: string = basePath + (pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : "");
+    const raw: { bars?: Record<string, T[]>; next_page_token?: string | null } = await alpacaDataFetch(path);
+    for (const [symbol, bars] of Object.entries(raw.bars ?? {})) {
+      (merged[symbol] ??= []).push(...bars);
+    }
+    pageToken = raw.next_page_token ?? null;
+    if (!pageToken) break;
+  }
+  return merged;
+}
+
+/**
  * Barre a 5 min della sola sessione regolare di oggi (9:30-16:00 ET, mai pre/post market).
  * Usa il calendario reale di Alpaca per il confine esatto — un fetch da "mezzanotte UTC"
  * includeva erroneamente le barre pre-market (dalle 4:00 ET), falsando sia il range di
@@ -101,11 +123,11 @@ async function fetchPrices(): Promise<Record<string, number>> {
  */
 async function fetchTodaySessionBars(now: Date, sessionOpenUtc: string): Promise<Record<string, AlpacaIntradayBarRaw[]>> {
   const symbols = UNIVERSE_SYMBOLS.join(",");
-  const raw = await alpacaDataFetch<{ bars?: Record<string, AlpacaIntradayBarRaw[]> }>(
+  const merged = await fetchBarsPaginated<AlpacaIntradayBarRaw>(
     `/v2/stocks/bars?symbols=${encodeURIComponent(symbols)}&timeframe=5Min&limit=3000&feed=iex&sort=asc&start=${encodeURIComponent(sessionOpenUtc)}&end=${encodeURIComponent(now.toISOString())}`
   );
   const out: Record<string, AlpacaIntradayBarRaw[]> = {};
-  for (const symbol of UNIVERSE_SYMBOLS) out[symbol] = raw.bars?.[symbol] ?? [];
+  for (const symbol of UNIVERSE_SYMBOLS) out[symbol] = merged[symbol] ?? [];
   return out;
 }
 
@@ -127,11 +149,11 @@ function sessionVWAP(bars: AlpacaIntradayBarRaw[]): number | null {
 async function fetchDailyBars(days: number): Promise<Record<string, AlpacaDailyBarRaw[]>> {
   const start = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const symbols = UNIVERSE_SYMBOLS.join(",");
-  const raw = await alpacaDataFetch<{ bars?: Record<string, AlpacaDailyBarRaw[]> }>(
+  const merged = await fetchBarsPaginated<AlpacaDailyBarRaw>(
     `/v2/stocks/bars?symbols=${encodeURIComponent(symbols)}&timeframe=1Day&limit=10000&feed=iex&sort=asc&start=${encodeURIComponent(start)}`
   );
   const out: Record<string, AlpacaDailyBarRaw[]> = {};
-  for (const symbol of UNIVERSE_SYMBOLS) out[symbol] = raw.bars?.[symbol] ?? [];
+  for (const symbol of UNIVERSE_SYMBOLS) out[symbol] = merged[symbol] ?? [];
   return out;
 }
 

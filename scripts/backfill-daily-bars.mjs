@@ -59,15 +59,29 @@ if (!keyId || !secretKey) {
 const days = Number(process.argv[2]) || 730;
 const sql = neon(connectionString);
 
+/**
+ * Con molti simboli e molti giorni la risposta multi-simbolo di Alpaca non entra in una
+ * sola pagina: torna solo un sottoinsieme di simboli/barre più un next_page_token. Senza
+ * seguire la paginazione fino in fondo, metà dei simboli risultano silenziosamente senza
+ * barre — scoperto allargando l'universo da 20 a 40 titoli.
+ */
 async function fetchDailyBars(symbols, start) {
-  const res = await fetch(
-    `https://data.alpaca.markets/v2/stocks/bars?symbols=${encodeURIComponent(symbols.join(","))}` +
-      `&timeframe=1Day&limit=10000&feed=iex&sort=asc&start=${encodeURIComponent(start)}`,
-    { headers: { "APCA-API-KEY-ID": keyId, "APCA-API-SECRET-KEY": secretKey } }
-  );
-  if (!res.ok) throw new Error(`Alpaca GET bars -> ${res.status} ${await res.text().catch(() => "")}`);
-  const body = await res.json();
-  return body.bars ?? {};
+  const merged = {};
+  let pageToken = null;
+  do {
+    const url =
+      `https://data.alpaca.markets/v2/stocks/bars?symbols=${encodeURIComponent(symbols.join(","))}` +
+      `&timeframe=1Day&limit=10000&feed=iex&sort=asc&start=${encodeURIComponent(start)}` +
+      (pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : "");
+    const res = await fetch(url, { headers: { "APCA-API-KEY-ID": keyId, "APCA-API-SECRET-KEY": secretKey } });
+    if (!res.ok) throw new Error(`Alpaca GET bars -> ${res.status} ${await res.text().catch(() => "")}`);
+    const body = await res.json();
+    for (const [symbol, bars] of Object.entries(body.bars ?? {})) {
+      (merged[symbol] ??= []).push(...bars);
+    }
+    pageToken = body.next_page_token ?? null;
+  } while (pageToken);
+  return merged;
 }
 
 async function saveDailyBars(rows) {

@@ -95,12 +95,32 @@ async function fetchTradingDays(count: number): Promise<string[]> {
   return cal.map((c) => c.date).slice(-count);
 }
 
+/**
+ * Con molti simboli la risposta multi-simbolo di Alpaca non entra sempre in una sola
+ * pagina: senza seguire next_page_token, alcuni simboli risultano silenziosamente senza
+ * barre. Stesso bug trovato e corretto in api/cron/tick.ts allargando l'universo a 40 titoli.
+ */
+async function fetchPaginated<T>(basePath: string): Promise<Record<string, T[]>> {
+  const merged: Record<string, T[]> = {};
+  let pageToken: string | null = null;
+  for (;;) {
+    const path: string = basePath + (pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : "");
+    const raw: { bars?: Record<string, T[]>; next_page_token?: string | null } = await alpacaDataFetch(path);
+    for (const [symbol, bars] of Object.entries(raw.bars ?? {})) {
+      (merged[symbol] ??= []).push(...bars);
+    }
+    pageToken = raw.next_page_token ?? null;
+    if (!pageToken) break;
+  }
+  return merged;
+}
+
 async function fetchSessionBars(startUtc: string, endUtc: string): Promise<Record<string, AlpacaIntradayBarRaw[]>> {
-  const raw = await alpacaDataFetch<{ bars?: Record<string, AlpacaIntradayBarRaw[]> }>(
+  const merged = await fetchPaginated<AlpacaIntradayBarRaw>(
     `/v2/stocks/bars?symbols=${encodeURIComponent(UNIVERSE_SYMBOLS.join(","))}&timeframe=5Min&limit=3000&feed=iex&sort=asc&start=${encodeURIComponent(startUtc)}&end=${encodeURIComponent(endUtc)}`
   );
   const out: Record<string, AlpacaIntradayBarRaw[]> = {};
-  for (const s of UNIVERSE_SYMBOLS) out[s] = raw.bars?.[s] ?? [];
+  for (const s of UNIVERSE_SYMBOLS) out[s] = merged[s] ?? [];
   return out;
 }
 

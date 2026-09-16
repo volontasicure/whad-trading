@@ -49,7 +49,7 @@ export function RulesView() {
     {
       label: "Universo investibile",
       hint: "Stessi titoli su lab e conto reale, equal weight",
-      value: `${MARKET.length} titoli · 5%`,
+      value: `${MARKET.length} titoli · ${(100 / MARKET.length).toFixed(1)}%`,
     },
     {
       label: "Selezione strategia del mattino",

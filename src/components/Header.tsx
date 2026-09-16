@@ -6,6 +6,7 @@ interface HeaderProps {
 }
 
 export function Header({ kicker, title }: HeaderProps) {
+  const seduta = new Date().toLocaleDateString("it-IT", { day: "2-digit", month: "short", year: "numeric" });
   return (
     <div
       style={{
@@ -23,9 +24,9 @@ export function Header({ kicker, title }: HeaderProps) {
         <div className="view-title">{title}</div>
       </div>
       <div style={{ display: "flex", alignItems: "stretch", gap: 22, flexWrap: "wrap" }}>
-        <HeaderStat label="SEDUTA" value="12 set 2026" />
+        <HeaderStat label="SEDUTA" value={seduta} />
         <HeaderStat label="CAPITALE / PORTAF." value={`${CAPITAL.toLocaleString("it-IT")} $`} />
-        <HeaderStat label="UNIVERSO" value={`${MARKET.length} titoli · 5% cad.`} />
+        <HeaderStat label="UNIVERSO" value={`${MARKET.length} titoli · ${(100 / MARKET.length).toFixed(1)}% cad.`} />
       </div>
     </div>
   );

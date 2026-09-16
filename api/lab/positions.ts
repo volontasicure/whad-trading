@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { db } from "../../server/db.js";
+import { fetchMarketSession } from "../../server/marketHours.js";
 
 interface Row {
   strategy_id: string;
@@ -23,17 +24,40 @@ export interface RealLabStrategyData {
   realizedToday: number;
 }
 
-/** Posizioni aperte + realized di oggi per ogni strategia che ha dati reali in lab_positions. */
+/**
+ * Confine della sessione da usare per "realizedToday": quella di oggi se il mercato ha già
+ * aperto (anche se ora è chiuso), altrimenti l'ultima sessione chiusa disponibile — mai
+ * mezzanotte UTC, che non ha alcun rapporto con l'orario NYSE e fa sparire silenziosamente
+ * il risultato di ieri non appena scatta la mezzanotte UTC, ben prima della riapertura reale
+ * (stesso tipo di bug della contaminazione pre-market già corretto in marketHours.ts).
+ */
+async function resolveRealizedSessionStartUtc(): Promise<string | null> {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const todaySession = await fetchMarketSession(todayIso);
+  if (todaySession && new Date(todaySession.openUtc).getTime() <= Date.now()) {
+    return todaySession.openUtc;
+  }
+
+  const lastRows = (await db()`
+    SELECT max(exit_time) AS last_exit FROM lab_positions WHERE status = 'closed'
+  `) as unknown as { last_exit: string | null }[];
+  const lastExit = lastRows[0]?.last_exit;
+  if (!lastExit) return null;
+
+  const lastSession = await fetchMarketSession(lastExit.slice(0, 10));
+  return lastSession?.openUtc ?? null;
+}
+
+/** Posizioni aperte (sempre correnti) + realized dell'ultima sessione rilevante per ogni strategia che ha dati reali. */
 export default async function handler(_req: VercelRequest, res: VercelResponse) {
   try {
-    const todayStart = new Date();
-    todayStart.setUTCHours(0, 0, 0, 0);
+    const sessionOpenUtc = await resolveRealizedSessionStartUtc();
 
     const rows = (await db()`
       SELECT strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price,
              realized_pnl::float8 AS realized_pnl, status
       FROM lab_positions
-      WHERE status = 'open' OR (status = 'closed' AND exit_time >= ${todayStart.toISOString()})
+      WHERE status = 'open' OR (status = 'closed' AND exit_time >= ${sessionOpenUtc ?? "9999-01-01"})
     `) as unknown as Row[];
 
     const byStrategy: Record<string, RealLabStrategyData> = {};
