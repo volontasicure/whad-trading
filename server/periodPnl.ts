@@ -48,13 +48,21 @@ export async function computeLabPeriodPnl(): Promise<Record<string, PeriodPnl>> 
 }
 
 /**
- * Portafoglio REALE: proxy da sessions.net, il netto reale del lab proposto dal debriefing
- * e seguito quel giorno — non c'è ancora un conto reale eseguito (vedi CLAUDE.md "Prossimi
- * passi" #2), quindi non esiste un'alternativa più diretta oggi.
+ * Portafoglio REALE: netto realizzato vero da real_positions (ordini davvero eseguiti su
+ * Alpaca, server/realExecution.ts), stesso schema di computeLabPeriodPnl ma senza
+ * raggruppare per strategia — è un solo conto, non tre lab paralleli. Non usa più sessions
+ * (il proxy "cosa avrebbe fatto il lab scelto", pre-esecuzione reale): ora che gli ordini
+ * sono davvero piazzati, mischiare un netto finto pre-esecuzione con uno vero post-esecuzione
+ * produrrebbe una serie incoerente — meglio azzerare la storia (reale = 0 prima di oggi, che
+ * è anche la verità) e ripartire da qui. Diverso dal "Portafoglio reale" in LiveView, che
+ * legge la portfolio history di Alpaca (approssima realized+unrealized, limite noto in
+ * api/broker/pnl.ts): questo è il realized puro calcolato da noi sui fill effettivi.
  */
 export async function computeRealPeriodPnl(): Promise<PeriodPnl> {
-  const rows = (await db()`
-    SELECT net::float8 AS net FROM sessions ORDER BY trading_date DESC
-  `) as unknown as { net: number }[];
+  const rows = (await db().query(
+    `SELECT (exit_time AT TIME ZONE 'UTC')::date AS d, sum(realized_pnl)::float8 AS net
+     FROM real_positions WHERE status = 'closed'
+     GROUP BY d ORDER BY d DESC`
+  )) as unknown as { d: string; net: number }[];
   return windowSums(rows.map((r) => r.net));
 }
