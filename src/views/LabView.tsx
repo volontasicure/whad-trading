@@ -73,6 +73,7 @@ export function LabView() {
                 <div style={{ display: "flex", alignItems: "flex-end", gap: 18, flexWrap: "wrap" }}>
                   <Metric label="REALIZED" value={money(sum.realized)} color={pnlColor(sum.realized)} />
                   <Metric label="UNREALIZED" value={money(sum.unrealized)} color={pnlColor(sum.unrealized)} />
+                  <Metric label="TOTALE" value={money(net)} color={pnlColor(net)} />
                 </div>
 
                 <div style={{ height: 46, margin: "0 -4px" }}>
