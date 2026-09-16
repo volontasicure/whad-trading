@@ -5,6 +5,7 @@ import { UNIVERSE_SYMBOLS } from "../../server/universe.js";
 import { decideLabEodCloses, type LabOpenRow } from "../../server/labEod.js";
 import { fetchMarketSession } from "../../server/marketHours.js";
 import { saveDailyBars, saveSessionBars } from "../../server/barsStore.js";
+import { runRealExecution, type RealPositionRow } from "../../server/realExecution.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
   STRATEGY_ID as ORB_STRATEGY_ID,
@@ -225,7 +226,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
-    const [prices, sessionBars, openRows] = await Promise.all([
+    const [prices, sessionBars, openRows, realOpenRows] = await Promise.all([
       fetchPrices(),
       fetchTodaySessionBars(now, session.openUtc),
       db()`
@@ -233,6 +234,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
                pair_key, stop_price::float8 AS stop_price, target_price::float8 AS target_price
         FROM lab_positions WHERE status = 'open'
       ` as unknown as Promise<LabPositionRow[]>,
+      db()`
+        SELECT id, strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price, entry_time,
+               pair_key, stop_price::float8 AS stop_price, target_price::float8 AS target_price
+        FROM real_positions WHERE status = 'open'
+      ` as unknown as Promise<RealPositionRow[]>,
     ]);
 
     const vwapOpen: VwapOpenPosition[] = openRows
@@ -255,6 +261,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const pairsOpen: OpenLeg[] = openRows
       .filter((r) => r.strategy_id === PAIRS_STRATEGY_ID && r.pair_key)
       .map((r) => ({ id: r.id, pairKey: r.pair_key!, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price }));
+    // Pair key delle posizioni PAIRS reali aperte: devono restare coperte dal refresh dei
+    // pairStats sotto esattamente come quelle dei lab, altrimenti una coppia reale rimasta
+    // fuori dalla selezione giornaliera non verrebbe più valutata per l'uscita.
+    const realPairsOpenKeys = new Set(
+      realOpenRows.filter((r) => r.strategy_id === PAIRS_STRATEGY_ID && r.pair_key).map((r) => r.pair_key!)
+    );
 
     const vwapSnapshots: Record<string, VwapSnapshot> = {};
     for (const symbol of UNIVERSE_SYMBOLS) {
@@ -299,7 +311,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    const openPairKeys = new Set(pairsOpen.map((l) => l.pairKey));
+    const openPairKeys = new Set([...pairsOpen.map((l) => l.pairKey), ...realPairsOpenKeys]);
     const coversAllOpenPairs = (stats: PairStats[]) =>
       [...openPairKeys].every((k) => stats.some((p) => pairKey(p.a, p.b) === k));
 
@@ -488,7 +500,38 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       eodClosedCount = singleCloses.length + pairLegsClosed;
     }
 
-    const note = `vwap: ${vwapExits.length} chiuse/${entriesSummary.vwap} aperte · orb: ${orbExits.length} chiuse/${entriesSummary.orb} aperte · pairs: ${pairsExits.length} chiuse/${entriesSummary.pairs} aperte${nearClose ? ` · EOD: ${eodClosedCount} chiuse` : ""}`;
+    // --- Esecuzione reale (conto Alpaca, ambiente paper): solo se il debriefing di oggi è
+    // stato confermato. Best-effort in senso stretto solo per l'isolamento dei tre lab sopra
+    // — un problema qui non deve mai impedire di salvare il tick dei lab — ma un errore reale
+    // (es. Alpaca irraggiungibile a metà invio ordini) resta comunque visibile in tick_log,
+    // non silenziato.
+    let realNote = "reale: non tentata";
+    try {
+      const sessionBarVolumes: Record<string, number[]> = {};
+      for (const symbol of UNIVERSE_SYMBOLS) sessionBarVolumes[symbol] = sessionBars[symbol].map((b) => b.v);
+
+      const realResult = await runRealExecution({
+        tradingDate,
+        now,
+        nearClose,
+        prices,
+        openingRanges,
+        orbAtr,
+        sessionBarVolumes,
+        vwapSnapshots,
+        vwapBars,
+        pairStats,
+        pairStatsByKey,
+        openRows: realOpenRows,
+      });
+      realNote = realResult.skipped
+        ? `reale: saltata (${realResult.reason})`
+        : `reale: ${realResult.chosenStrategyId}, ${realResult.exits} chiuse/${realResult.entries} aperte`;
+    } catch (err) {
+      realNote = `reale: errore (${(err as Error).message})`;
+    }
+
+    const note = `vwap: ${vwapExits.length} chiuse/${entriesSummary.vwap} aperte · orb: ${orbExits.length} chiuse/${entriesSummary.orb} aperte · pairs: ${pairsExits.length} chiuse/${entriesSummary.pairs} aperte${nearClose ? ` · EOD: ${eodClosedCount} chiuse` : ""} · ${realNote}`;
     await db()`INSERT INTO tick_log (market_open, note) VALUES (true, ${note})`;
 
     res.status(200).json({ marketOpen: true, nearClose, note, entriesSummary, eodClosedCount });

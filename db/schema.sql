@@ -132,3 +132,35 @@ CREATE TABLE IF NOT EXISTS pairs_zscore_log (
 );
 
 CREATE INDEX IF NOT EXISTS pairs_zscore_log_date_pair_idx ON pairs_zscore_log (trading_date, pair_key);
+
+-- Posizioni REALMENTE eseguite sul conto Alpaca (a differenza di lab_positions, che è
+-- sempre simulazione interna). Specchio di lab_positions con in più broker_order_id/
+-- broker_exit_order_id (tracciabilità dell'ordine Alpaca) e conviction (il punteggio usato
+-- dal sizing per convinzione, server/realSizing.ts, per poter analizzare in futuro se ha
+-- davvero aiutato — raccolto da subito, non c'è stata una fase di validazione separata).
+-- strategy_id persiste con la posizione anche se il debriefing di un giorno successivo
+-- sceglie un'altra strategia (stessa logica di lab_positions: una posizione esce sempre
+-- con le regole della strategia che l'ha aperta).
+CREATE TABLE IF NOT EXISTS real_positions (
+  id SERIAL PRIMARY KEY,
+  strategy_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL,
+  qty NUMERIC NOT NULL,
+  entry_price NUMERIC NOT NULL,
+  entry_time TIMESTAMPTZ NOT NULL DEFAULT now(),
+  exit_price NUMERIC,
+  exit_time TIMESTAMPTZ,
+  realized_pnl NUMERIC,
+  status TEXT NOT NULL DEFAULT 'open',
+  pair_key TEXT,
+  stop_price NUMERIC,
+  target_price NUMERIC,
+  exit_reason TEXT,
+  conviction NUMERIC,
+  broker_order_id TEXT,
+  broker_exit_order_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS real_positions_strategy_status_idx ON real_positions (strategy_id, status);
+CREATE INDEX IF NOT EXISTS real_positions_pair_key_idx ON real_positions (pair_key) WHERE pair_key IS NOT NULL;

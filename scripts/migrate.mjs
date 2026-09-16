@@ -33,7 +33,18 @@ if (!connectionString) {
 const sql = neon(connectionString);
 const schema = readFileSync(path.resolve(process.cwd(), "db/schema.sql"), "utf8");
 
-const statements = schema
+// Toglie i commenti "-- ..." PRIMA di dividere sui ";": un commento SQL può contenere un
+// punto e virgola nel testo (es. "...#ExitDecision;") che altrimenti lo splitter naive
+// scambierebbe per fine statement, troncando lo statement vero a metà.
+const withoutComments = schema
+  .split("\n")
+  .map((line) => {
+    const idx = line.indexOf("--");
+    return idx === -1 ? line : line.slice(0, idx);
+  })
+  .join("\n");
+
+const statements = withoutComments
   .split(/;\s*(?:\n|$)/)
   .map((s) => s.trim())
   .filter(Boolean);

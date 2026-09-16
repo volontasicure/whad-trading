@@ -247,6 +247,44 @@ async function run() {
     );
   }
 
+  // --- Stessi controlli su real_positions (conto Alpaca reale, ambiente paper): stesso
+  // schema di lab_positions, stessi tetti per strategia, vedi server/realExecution.ts ---
+  const realOpenCounts = (await sql.query(
+    `SELECT strategy_id, count(*)::int AS n FROM real_positions WHERE status = 'open' GROUP BY strategy_id`
+  )) as { strategy_id: string; n: number }[];
+  const realCountByStrategy: Record<string, number> = {};
+  for (const row of realOpenCounts) realCountByStrategy[row.strategy_id] = row.n;
+  const realOrbOpen = realCountByStrategy[ORB_STRATEGY_ID] ?? 0;
+  const realVwapOpen = realCountByStrategy[VWAP_STRATEGY_ID] ?? 0;
+  const realPairsLegsOpen = realCountByStrategy[PAIRS_STRATEGY_ID] ?? 0;
+  if (realOrbOpen > ORB_MAX_POSITIONS) flag(`[REALE] ORB ha ${realOrbOpen} posizioni aperte (limite ${ORB_MAX_POSITIONS})`, "Controlla server/realExecution.ts: il tetto massimo di posizioni non dovrebbe mai essere superabile sul conto reale.");
+  if (realVwapOpen > VWAP_MAX_POSITIONS) flag(`[REALE] VWAP reversion ha ${realVwapOpen} posizioni aperte (limite ${VWAP_MAX_POSITIONS})`, "Controlla server/realExecution.ts.");
+  if (realPairsLegsOpen > MAX_PAIRS * 2) flag(`[REALE] Pairs trading ha ${realPairsLegsOpen} gambe aperte (limite ${MAX_PAIRS} coppie = ${MAX_PAIRS * 2} gambe)`, "Controlla server/realExecution.ts.");
+
+  const realPairLegCounts = (await sql.query(
+    `SELECT pair_key, count(*)::int AS n FROM real_positions WHERE status = 'open' AND strategy_id = $1 AND pair_key IS NOT NULL GROUP BY pair_key`,
+    [PAIRS_STRATEGY_ID]
+  )) as { pair_key: string; n: number }[];
+  for (const row of realPairLegCounts) {
+    if (row.n !== 2) {
+      flag(
+        `[REALE] Coppia ${row.pair_key} ha ${row.n} gambe aperte invece di 2`,
+        "Gamba orfana sul conto reale: verifica server/realExecution.ts e chiudila manualmente su Alpaca se necessario — qui sono soldi (paper) veri, non solo un record nel DB."
+      );
+    }
+  }
+
+  const realInvalidRows = (await sql.query(
+    `SELECT id, symbol, qty::float8 AS qty, entry_price::float8 AS entry_price FROM real_positions
+     WHERE status = 'open' AND (qty IS NULL OR qty <= 0 OR entry_price IS NULL OR entry_price <= 0)`
+  )) as { id: number; symbol: string; qty: number | null; entry_price: number | null }[];
+  for (const row of realInvalidRows) {
+    flag(
+      `[REALE] Posizione #${row.id} (${row.symbol}) ha qty=${row.qty} entry_price=${row.entry_price}`,
+      "Valore non valido su una posizione reale aperta: controlla server/realExecution.ts e l'ordine corrispondente su Alpaca."
+    );
+  }
+
   // --- Performance di oggi per strategia (informativo, non un'anomalia) ---
   perfLines.push(...(await printTodayPerformance(tradingDate)));
 
