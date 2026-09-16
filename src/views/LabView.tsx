@@ -124,13 +124,11 @@ export function LabView() {
               padding: "15px 18px",
               borderBottom: "1px solid var(--border-divider)",
               display: "flex",
-              alignItems: "flex-start",
-              justifyContent: "space-between",
-              gap: 16,
-              flexWrap: "wrap",
+              flexDirection: "column",
+              gap: 12,
             }}
           >
-            <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: "1 1 460px", minWidth: 0 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
               <div style={{ fontSize: 15, fontWeight: 500 }}>P&amp;L realized per periodo</div>
               <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>
                 Costi dedotti. Unrealized/Totale disponibili solo su Ult. giornata e Da inizio (le uniche legate ad
@@ -138,7 +136,7 @@ export function LabView() {
                 scelta al mattino.
               </div>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
               <div style={{ display: "flex", gap: 6, flex: "0 0 auto" }}>
                 {PERIOD_PNL_VIEW_OPTIONS.map((o) => (
                   <div
