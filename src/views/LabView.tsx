@@ -143,10 +143,10 @@ export function LabView() {
           </div>
 
           {STRATEGIES.map((s) => {
-            const p = periodPnlFor(s.code.toLowerCase().replace(" ", "-"));
+            const p = periodPnlFor(s.code.toLowerCase().replace(" ", "-"), realLabStrategies[s.id]);
             return <PnlRow key={s.id} label={s.code} sub={s.shortName} p={p} pnlMode={pnlMode} />;
           })}
-          <PnlRow label="REALE" sub="conto Alpaca" p={periodPnlFor("real")} pnlMode={pnlMode} highlight />
+          <PnlRow label="REALE" sub="conto Alpaca" p={periodPnlFor("real", realLabStrategies.real)} pnlMode={pnlMode} highlight />
         </div>
 
         <div

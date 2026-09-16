@@ -1,6 +1,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { db } from "../../server/db.js";
 import { fetchMarketSession } from "../../server/marketHours.js";
+import { computeLabPeriodPnl, computeRealPeriodPnl } from "../../server/periodPnl.js";
+
+/** Chiave usata per il portafoglio REALE in questa risposta, accanto alle 3 strategie lab. */
+const REAL_PORTFOLIO_KEY = "real";
 
 interface Row {
   strategy_id: string;
@@ -22,6 +26,9 @@ export interface RealLabPosition {
 export interface RealLabStrategyData {
   openPositions: RealLabPosition[];
   realizedToday: number;
+  previousWeek: number;
+  previousMonth: number;
+  sinceInception: number;
 }
 
 /**
@@ -48,21 +55,34 @@ async function resolveRealizedSessionStartUtc(): Promise<string | null> {
   return lastSession?.openUtc ?? null;
 }
 
-/** Posizioni aperte (sempre correnti) + realized dell'ultima sessione rilevante per ogni strategia che ha dati reali. */
+function emptyStrategyData(): RealLabStrategyData {
+  return { openPositions: [], realizedToday: 0, previousWeek: 0, previousMonth: 0, sinceInception: 0 };
+}
+
+/**
+ * Posizioni aperte (sempre correnti) + realized dell'ultima sessione rilevante per ogni
+ * strategia lab che ha dati reali, più gli aggregati per periodo (settimana/mese/da inizio,
+ * finestre mobili sulle sedute chiuse — vedi server/periodPnl.ts) per le 3 strategie lab e
+ * per il portafoglio REALE (chiave "real", proxy da sessions.net).
+ */
 export default async function handler(_req: VercelRequest, res: VercelResponse) {
   try {
     const sessionOpenUtc = await resolveRealizedSessionStartUtc();
 
-    const rows = (await db()`
-      SELECT strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price,
-             realized_pnl::float8 AS realized_pnl, status
-      FROM lab_positions
-      WHERE status = 'open' OR (status = 'closed' AND exit_time >= ${sessionOpenUtc ?? "9999-01-01"})
-    `) as unknown as Row[];
+    const [rows, labPeriods, realPeriod] = await Promise.all([
+      db()`
+        SELECT strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price,
+               realized_pnl::float8 AS realized_pnl, status
+        FROM lab_positions
+        WHERE status = 'open' OR (status = 'closed' AND exit_time >= ${sessionOpenUtc ?? "9999-01-01"})
+      ` as unknown as Promise<Row[]>,
+      computeLabPeriodPnl(),
+      computeRealPeriodPnl(),
+    ]);
 
     const byStrategy: Record<string, RealLabStrategyData> = {};
     for (const r of rows) {
-      if (!byStrategy[r.strategy_id]) byStrategy[r.strategy_id] = { openPositions: [], realizedToday: 0 };
+      if (!byStrategy[r.strategy_id]) byStrategy[r.strategy_id] = emptyStrategyData();
       if (r.status === "open") {
         byStrategy[r.strategy_id].openPositions.push({
           symbol: r.symbol,
@@ -74,6 +94,21 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
         byStrategy[r.strategy_id].realizedToday += r.realized_pnl ?? 0;
       }
     }
+
+    for (const [strategyId, period] of Object.entries(labPeriods)) {
+      if (!byStrategy[strategyId]) byStrategy[strategyId] = emptyStrategyData();
+      byStrategy[strategyId].previousWeek = period.previousWeek;
+      byStrategy[strategyId].previousMonth = period.previousMonth;
+      byStrategy[strategyId].sinceInception = period.sinceInception;
+    }
+
+    byStrategy[REAL_PORTFOLIO_KEY] = {
+      ...emptyStrategyData(),
+      realizedToday: realPeriod.lastSession,
+      previousWeek: realPeriod.previousWeek,
+      previousMonth: realPeriod.previousMonth,
+      sinceInception: realPeriod.sinceInception,
+    };
 
     res.status(200).json(byStrategy);
   } catch (err) {

@@ -379,9 +379,24 @@ export const PERIOD_PNL: PeriodPnl[] = [
   },
 ];
 
-export function periodPnlFor(portfolioId: string): PeriodPnl {
+/**
+ * P&L per periodo per un portafoglio: sostituisce i valori simulati con quelli reali
+ * (finestre mobili sulle sedute chiuse, vedi server/periodPnl.ts) quando disponibili per
+ * quella strategia/il conto reale; fallback alla simulazione altrimenti — stesso pattern di
+ * mergeRealLabData.
+ */
+export function periodPnlFor(portfolioId: string, real?: RealLabStrategyData): PeriodPnl {
   const found = PERIOD_PNL.find((p) => p.portfolioId === portfolioId);
   if (!found) throw new Error(`Nessun P&L per periodo per il portafoglio ${portfolioId}`);
+  if (real) {
+    return {
+      ...found,
+      lastSession: real.realizedToday,
+      previousWeek: real.previousWeek,
+      previousMonth: real.previousMonth,
+      sinceInception: real.sinceInception,
+    };
+  }
   return found;
 }
 
@@ -519,10 +534,17 @@ export interface RealLabPosition {
 export interface RealLabStrategyData {
   openPositions: RealLabPosition[];
   realizedToday: number;
+  previousWeek: number;
+  previousMonth: number;
+  sinceInception: number;
 }
 
-/** Una voce per strategia con dati reali (id = "orb" | "pairs" | "vwap_reversion"); assente = ancora simulata. */
-export type RealLabOverrides = Partial<Record<StrategyId, RealLabStrategyData>>;
+/**
+ * Una voce per strategia con dati reali (id = "orb" | "pairs" | "vwap_reversion"), più "real"
+ * per il portafoglio REALE (proxy da sessions.net — vedi server/periodPnl.ts); assente =
+ * ancora simulata.
+ */
+export type RealLabOverrides = Partial<Record<StrategyId | "real", RealLabStrategyData>>;
 
 /**
  * Sostituisce, per le sole strategie con dati reali, le celle simulate del libro con le
