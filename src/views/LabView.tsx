@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Header } from "../components/Header";
 import { PnlModeToggle } from "../components/PnlModeToggle";
@@ -5,6 +6,7 @@ import { Sparkline } from "../components/Sparkline";
 import { StatusBadge } from "../components/StatusBadge";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
+import { useRealPortfolio } from "../hooks/useRealPortfolio";
 import type { DataStatus } from "../types";
 import {
   STRATEGIES,
@@ -16,10 +18,23 @@ import {
   type BookRow,
 } from "../data/mockData";
 
+/** Realized/Unrealized/Totale hanno senso solo su ULT. GIORNATA e DA INIZIO: sono le uniche
+ *  due colonne legate ad "adesso" (posizioni di oggi ancora aperte / qualunque posizione mai
+ *  aperta e ancora viva). SETT. PREC./MESE PREC. sono periodi ormai chiusi — l'unrealized non
+ *  ha un valore storico lì, quindi restano sempre realized qualunque sia la modalità. */
+type PeriodPnlView = "realized" | "unrealized" | "total";
+const PERIOD_PNL_VIEW_OPTIONS: { id: PeriodPnlView; label: string }[] = [
+  { id: "realized", label: "Realized" },
+  { id: "unrealized", label: "Unrealized" },
+  { id: "total", label: "Totale" },
+];
+
 export function LabView() {
   const navigate = useNavigate();
   const { pnlMode, eodAutoClose, liveMarket, realLabStrategies, labPositionsSource } = useAppState();
   const { book, strategySums, equityCurves, todayRank, positionsToClose } = liveMarket;
+  const [periodPnlView, setPeriodPnlView] = useState<PeriodPnlView>("realized");
+  const { data: realPortfolio } = useRealPortfolio();
 
   return (
     <>
@@ -118,11 +133,25 @@ export function LabView() {
             <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: "1 1 240px", minWidth: 0 }}>
               <div style={{ fontSize: 15, fontWeight: 500 }}>P&amp;L realized per periodo</div>
               <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>
-                Solo utili e perdite effettivamente incassati, costi dedotti. Il conto reale usa ogni giorno la
-                strategia scelta al mattino.
+                Costi dedotti. Unrealized/Totale disponibili solo su Ult. giornata e Da inizio (le uniche legate ad
+                adesso: sett./mese precedenti sono periodi ormai chiusi). Il conto reale usa ogni giorno la strategia
+                scelta al mattino.
               </div>
             </div>
-            <PnlModeToggle />
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+              <div style={{ display: "flex", gap: 6, flex: "0 0 auto" }}>
+                {PERIOD_PNL_VIEW_OPTIONS.map((o) => (
+                  <div
+                    key={o.id}
+                    className={`pill${periodPnlView === o.id ? " active" : ""}`}
+                    onClick={() => setPeriodPnlView(o.id)}
+                  >
+                    {o.label}
+                  </div>
+                ))}
+              </div>
+              <PnlModeToggle />
+            </div>
           </div>
 
           <div
@@ -143,11 +172,29 @@ export function LabView() {
             <div className="table-header-cell" style={{ textAlign: "right" }}>DA INIZIO</div>
           </div>
 
-          {STRATEGIES.map((s) => {
+          {STRATEGIES.map((s, i) => {
             const p = periodPnlFor(s.code.toLowerCase().replace(" ", "-"), realLabStrategies[s.id]);
-            return <PnlRow key={s.id} label={s.code} sub={s.shortName} p={p} pnlMode={pnlMode} />;
+            return (
+              <PnlRow
+                key={s.id}
+                label={s.code}
+                sub={s.shortName}
+                p={p}
+                pnlMode={pnlMode}
+                unrealized={strategySums[i].unrealized}
+                periodPnlView={periodPnlView}
+              />
+            );
           })}
-          <PnlRow label="REALE" sub="conto Alpaca" p={periodPnlFor("real", realLabStrategies.real)} pnlMode={pnlMode} highlight />
+          <PnlRow
+            label="REALE"
+            sub="conto Alpaca"
+            p={periodPnlFor("real", realLabStrategies.real)}
+            pnlMode={pnlMode}
+            unrealized={realPortfolio.unrealized}
+            periodPnlView={periodPnlView}
+            highlight
+          />
         </div>
 
         <div
@@ -223,14 +270,30 @@ function PnlRow({
   sub,
   p,
   pnlMode,
+  unrealized,
+  periodPnlView,
   highlight,
 }: {
   label: string;
   sub: string;
   p: ReturnType<typeof periodPnlFor>;
   pnlMode: "abs" | "pct";
+  /** Unrealized corrente ("adesso"), non un dato storico — vedi PeriodPnlView sopra. */
+  unrealized: number;
+  periodPnlView: PeriodPnlView;
   highlight?: boolean;
 }) {
+  // Realized/Unrealized/Totale si applicano solo a ULT. GIORNATA e DA INIZIO: sono le uniche
+  // due colonne legate ad "adesso". SETT./MESE PREC. restano sempre il netto realizzato di
+  // quel periodo, qualunque sia la modalità (un periodo chiuso non ha un "unrealized" storico).
+  const applyView = (realizedValue: number): number => {
+    if (periodPnlView === "unrealized") return unrealized;
+    if (periodPnlView === "total") return realizedValue + unrealized;
+    return realizedValue;
+  };
+  const lastSession = applyView(p.lastSession);
+  const sinceInception = applyView(p.sinceInception);
+
   return (
     <div
       style={{
@@ -251,8 +314,8 @@ function PnlRow({
           {sub}
         </div>
       </div>
-      <div className="mono" style={{ fontSize: 12.5, textAlign: "right", color: pnlColor(p.lastSession) }}>
-        {formatPnl(p.lastSession, pnlMode)}
+      <div className="mono" style={{ fontSize: 12.5, textAlign: "right", color: pnlColor(lastSession) }}>
+        {formatPnl(lastSession, pnlMode)}
       </div>
       <div className="mono" style={{ fontSize: 12.5, textAlign: "right", color: pnlColor(p.previousWeek) }}>
         {formatPnl(p.previousWeek, pnlMode)}
@@ -260,8 +323,8 @@ function PnlRow({
       <div className="mono" style={{ fontSize: 12.5, textAlign: "right", color: pnlColor(p.previousMonth) }}>
         {formatPnl(p.previousMonth, pnlMode)}
       </div>
-      <div className="mono" style={{ fontSize: 13, fontWeight: 500, textAlign: "right", color: pnlColor(p.sinceInception) }}>
-        {formatPnl(p.sinceInception, pnlMode)}
+      <div className="mono" style={{ fontSize: 13, fontWeight: 500, textAlign: "right", color: pnlColor(sinceInception) }}>
+        {formatPnl(sinceInception, pnlMode)}
       </div>
     </div>
   );
