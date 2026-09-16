@@ -40,11 +40,11 @@ async function resolveRealizedSessionStartUtc(): Promise<string | null> {
 
   const lastRows = (await db()`
     SELECT max(exit_time) AS last_exit FROM lab_positions WHERE status = 'closed'
-  `) as unknown as { last_exit: string | null }[];
+  `) as unknown as { last_exit: Date | null }[];
   const lastExit = lastRows[0]?.last_exit;
   if (!lastExit) return null;
 
-  const lastSession = await fetchMarketSession(lastExit.slice(0, 10));
+  const lastSession = await fetchMarketSession(new Date(lastExit).toISOString().slice(0, 10));
   return lastSession?.openUtc ?? null;
 }
 
