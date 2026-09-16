@@ -130,7 +130,7 @@ export function LabView() {
               flexWrap: "wrap",
             }}
           >
-            <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: "1 1 240px", minWidth: 0 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: "1 1 460px", minWidth: 0 }}>
               <div style={{ fontSize: 15, fontWeight: 500 }}>P&amp;L realized per periodo</div>
               <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>
                 Costi dedotti. Unrealized/Totale disponibili solo su Ult. giornata e Da inizio (le uniche legate ad
