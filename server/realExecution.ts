@@ -259,7 +259,9 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     if (chosenStrategyId === VWAP_STRATEGY_ID) {
       const stillOpen = new Set(vwapOpen.filter((p) => !vwapExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
       const freeSlots = VWAP_MAX_POSITIONS - stillOpen.size;
-      const candidates = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots, ctx.vwapTrend);
+      // ctx.vwapTrend disponibile ma NON passato qui apposta — stesso interruttore spento di
+      // api/cron/tick.ts, vedi il commento lì.
+      const candidates = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
       const sizingInput: SizingCandidate[] = candidates.map((c) => ({ symbol: c.symbol, price: c.entryPrice, conviction: Math.abs(c.distancePct) }));
       const sized = sizeByConviction(sizingInput, capital, VWAP_MAX_POSITIONS);
       for (const c of candidates) {

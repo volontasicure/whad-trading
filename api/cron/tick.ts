@@ -434,7 +434,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const entriesSummary = { vwap: 0, orb: 0, pairs: 0 };
     if (!nearClose) {
       const vwapStillOpen = new Set(vwapOpen.filter((p) => !vwapExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
-      const vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpen, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpen.size, vwapTrend);
+      // vwapTrend calcolato sopra ma NON passato qui apposta: il filtro di trend è pronto ma
+      // tenuto spento in produzione finché non viene deciso esplicitamente di attivarlo (vedi
+      // CLAUDE.md "Prossimi passi" #9 — backtest con segnale misto, non generalizza fuori
+      // campione). Riattivare aggiungendo `, vwapTrend` qui e nella chiamata gemella in
+      // server/realExecution.ts.
+      const vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpen, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpen.size);
       for (const e of vwapEntries) {
         await db()`INSERT INTO lab_positions (strategy_id, symbol, side, qty, entry_price, entry_time, status) VALUES (${VWAP_STRATEGY_ID}, ${e.symbol}, ${e.side}, ${e.qty}, ${e.entryPrice}, ${now.toISOString()}, 'open')`;
       }
