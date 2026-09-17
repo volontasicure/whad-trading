@@ -12,6 +12,24 @@ export const RSI_OVERBOUGHT = 70;
 export const RSI_OVERSOLD = 30;
 export const STOP_LOSS_PCT = 0.6;
 export const MAX_HOLD_MINUTES = 45;
+/**
+ * Filtro di trend di fondo (media mobile + Efficiency Ratio di Kaufman, server/
+ * technicalIndicators.ts): non scommettere sul ritorno al VWAP contro un titolo che è già in
+ * un trend pulito nella direzione opposta alla scommessa — es. non comprare aspettando un
+ * rimbalzo se il titolo è sotto la propria media mobile con un ribasso direzionale vero, non
+ * rumore. Aggiunto dopo il 16/9/2026: BA rientrata 5 volte consecutive in mean-reversion
+ * mentre scendeva in un trend reale (confermato a posteriori con lo stesso filtro sulla
+ * breakdown ladder short — CAT/HON/GE, stesso settore di BA, erano risultati i migliori
+ * proprio perché in un ribasso pulito quel giorno). Parametri indipendenti da quelli della
+ * ladder (stesso punto di partenza, potranno essere tarati separatamente).
+ */
+export const TREND_FILTER_DAYS = 20;
+export const MIN_TREND_EFFICIENCY = 0.3;
+
+export interface TrendContext {
+  sma: number;
+  efficiency: number;
+}
 
 export type Side = "LONG" | "SHORT";
 
@@ -113,13 +131,17 @@ export function decideExits(
  * totali tra quelle già aperte e quelle nuove). Equal-weight sul massimo di posizioni della
  * strategia (CAPITAL / MAX_POSITIONS), non sull'intero universo — così il laboratorio
  * dispiega tutto il capitale quando è a pieno regime, invece di lasciarne inutilizzato.
+ *
+ * trendBySymbol (giornaliero, calcolato dal chiamante): filtro di trend — vedi TrendContext
+ * sopra. Default {} per compatibilità, ma va sempre popolato dai chiamanti reali.
  */
 export function decideEntries(
   universeSymbols: string[],
   openSymbols: Set<string>,
   snapshots: Record<string, Snapshot>,
   barsBySymbol: Record<string, Bar[]>,
-  freeSlots: number
+  freeSlots: number,
+  trendBySymbol: Record<string, TrendContext> = {}
 ): EntryDecision[] {
   if (freeSlots <= 0) return [];
 
@@ -139,6 +161,15 @@ export function decideEntries(
 
     const exhausted = distancePct > 0 ? rsi > RSI_OVERBOUGHT : rsi < RSI_OVERSOLD;
     if (!exhausted) continue;
+
+    // Filtro di trend: non scommettere sul ritorno alla media contro un trend di fondo pulito
+    // nella direzione opposta alla scommessa (prezzo sopra VWAP + già in rialzo pulito -> non
+    // shortare; prezzo sotto VWAP + già in ribasso pulito -> non comprare, caso BA 16/9).
+    const trend = trendBySymbol[symbol];
+    if (trend && trend.efficiency >= MIN_TREND_EFFICIENCY) {
+      if (distancePct > 0 && snap.price > trend.sma) continue;
+      if (distancePct < 0 && snap.price < trend.sma) continue;
+    }
 
     candidates.push({
       symbol,

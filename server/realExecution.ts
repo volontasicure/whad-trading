@@ -40,6 +40,7 @@ import {
   decideExits as decideVwapExits,
   type OpenPosition as VwapOpenPosition,
   type Snapshot as VwapSnapshot,
+  type TrendContext as VwapTrendContext,
 } from "./vwapReversion.js";
 
 export interface RealPositionRow {
@@ -62,6 +63,7 @@ export interface RealExecutionContext {
   prices: Record<string, number>;
   openingRanges: Record<string, OpeningRange>;
   orbAtr: Record<string, number>;
+  vwapTrend: Record<string, VwapTrendContext>;
   /** Volumi delle barre a 5 min di oggi per simbolo, in ordine cronologico (solo il volume, per ricostruire avg/ultimo senza dipendere dal tipo barra privato di tick.ts). */
   sessionBarVolumes: Record<string, number[]>;
   vwapSnapshots: Record<string, VwapSnapshot>;
@@ -257,7 +259,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     if (chosenStrategyId === VWAP_STRATEGY_ID) {
       const stillOpen = new Set(vwapOpen.filter((p) => !vwapExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
       const freeSlots = VWAP_MAX_POSITIONS - stillOpen.size;
-      const candidates = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
+      const candidates = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots, ctx.vwapTrend);
       const sizingInput: SizingCandidate[] = candidates.map((c) => ({ symbol: c.symbol, price: c.entryPrice, conviction: Math.abs(c.distancePct) }));
       const sized = sizeByConviction(sizingInput, capital, VWAP_MAX_POSITIONS);
       for (const c of candidates) {

@@ -33,11 +33,14 @@ import {
 import {
   MAX_POSITIONS as VWAP_MAX_POSITIONS,
   STRATEGY_ID as VWAP_STRATEGY_ID,
+  TREND_FILTER_DAYS as VWAP_TREND_FILTER_DAYS,
   decideEntries as decideVwapEntries,
   decideExits as decideVwapExits,
   type OpenPosition as VwapOpenPosition,
   type Snapshot as VwapSnapshot,
+  type TrendContext as VwapTrendContext,
 } from "../../server/vwapReversion.js";
+import { computeSMA, computeTrendEfficiency } from "../../server/technicalIndicators.js";
 
 const EOD_CLOSE_WINDOW_MINUTES = 20;
 // Guard contro esecuzioni troppo ravvicinate: protegge sia da un TICK_SECRET trapelato
@@ -316,8 +319,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       [...openPairKeys].every((k) => stats.some((p) => pairKey(p.a, p.b) === k));
 
     let orbAtr = (await getCachedState<Record<string, number>>(ORB_STRATEGY_ID, tradingDate, "atr")) ?? {};
+    let vwapTrend = (await getCachedState<Record<string, VwapTrendContext>>(VWAP_STRATEGY_ID, tradingDate, "trend")) ?? {};
     let pairStats = (await getCachedState<PairStats[]>(PAIRS_STRATEGY_ID, tradingDate, "pair_stats")) ?? [];
-    if (Object.keys(orbAtr).length === 0 || pairStats.length === 0 || !coversAllOpenPairs(pairStats)) {
+    if (Object.keys(orbAtr).length === 0 || Object.keys(vwapTrend).length === 0 || pairStats.length === 0 || !coversAllOpenPairs(pairStats)) {
       const dailyBars = await fetchDailyBars(90);
       const closesBySymbol: Record<string, number[]> = {};
       for (const symbol of UNIVERSE_SYMBOLS) closesBySymbol[symbol] = dailyBars[symbol].map((b) => b.c);
@@ -346,6 +350,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
         await setCachedState(ORB_STRATEGY_ID, tradingDate, "atr", computed);
         orbAtr = computed;
+      }
+
+      if (Object.keys(vwapTrend).length === 0) {
+        const computed: Record<string, VwapTrendContext> = {};
+        for (const symbol of UNIVERSE_SYMBOLS) {
+          const sma = computeSMA(closesBySymbol[symbol], VWAP_TREND_FILTER_DAYS);
+          const efficiency = computeTrendEfficiency(closesBySymbol[symbol], VWAP_TREND_FILTER_DAYS);
+          if (sma != null && efficiency != null) computed[symbol] = { sma, efficiency };
+        }
+        await setCachedState(VWAP_STRATEGY_ID, tradingDate, "trend", computed);
+        vwapTrend = computed;
       }
 
       if (pairStats.length === 0) pairStats = selectPairs(closesBySymbol);
@@ -419,7 +434,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const entriesSummary = { vwap: 0, orb: 0, pairs: 0 };
     if (!nearClose) {
       const vwapStillOpen = new Set(vwapOpen.filter((p) => !vwapExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
-      const vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpen, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpen.size);
+      const vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpen, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpen.size, vwapTrend);
       for (const e of vwapEntries) {
         await db()`INSERT INTO lab_positions (strategy_id, symbol, side, qty, entry_price, entry_time, status) VALUES (${VWAP_STRATEGY_ID}, ${e.symbol}, ${e.side}, ${e.qty}, ${e.entryPrice}, ${now.toISOString()}, 'open')`;
       }
@@ -517,6 +532,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         prices,
         openingRanges,
         orbAtr,
+        vwapTrend,
         sessionBarVolumes,
         vwapSnapshots,
         vwapBars,

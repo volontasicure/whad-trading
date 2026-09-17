@@ -28,12 +28,15 @@ import {
 } from "../server/orb.js";
 import {
   MAX_POSITIONS as VWAP_MAX_POSITIONS,
+  TREND_FILTER_DAYS as VWAP_TREND_FILTER_DAYS,
   decideEntries as decideVwapEntries,
   decideExits as decideVwapExits,
   type Bar as VwapBar,
   type OpenPosition as VwapOpenPosition,
   type Snapshot as VwapSnapshot,
+  type TrendContext as VwapTrendContext,
 } from "../server/vwapReversion.js";
+import { computeSMA, computeTrendEfficiency } from "../server/technicalIndicators.js";
 import {
   MAX_PAIRS,
   decideEntries as decidePairsEntries,
@@ -88,11 +91,14 @@ interface AlpacaCalendarEntry {
   date: string;
 }
 
-async function fetchTradingDays(count: number): Promise<string[]> {
-  const end = new Date().toISOString().slice(0, 10);
-  const start = new Date(Date.now() - (count + 15) * 86_400_000).toISOString().slice(0, 10);
+/** beforeDateIso, se dato, ancora la finestra PRIMA di quella data (esclusa) invece che su oggi — per test fuori campione. */
+async function fetchTradingDays(count: number, beforeDateIso?: string): Promise<string[]> {
+  const end = beforeDateIso ?? new Date().toISOString().slice(0, 10);
+  const start = new Date(new Date(end).getTime() - (count + 15) * 86_400_000).toISOString().slice(0, 10);
   const cal = await alpacaFetch<AlpacaCalendarEntry[]>(`/v2/calendar?start=${start}&end=${end}`);
-  return cal.map((c) => c.date).slice(-count);
+  const days = cal.map((c) => c.date);
+  const filtered = beforeDateIso ? days.filter((d) => d < beforeDateIso) : days;
+  return filtered.slice(-count);
 }
 
 /**
@@ -163,7 +169,8 @@ const totals = {
 
 async function run() {
   const dayCount = Number(process.argv[2]) || 5;
-  const tradingDays = await fetchTradingDays(dayCount);
+  const beforeDateIso = process.argv[3] || undefined;
+  const tradingDays = await fetchTradingDays(dayCount, beforeDateIso);
   console.log(`Rigioco ${tradingDays.length} giorni di mercato: ${tradingDays.join(", ")}\n`);
 
   let nextId = 1;
@@ -206,6 +213,13 @@ async function run() {
       const atr = computeATRPct(dailyBarsBefore[s]);
       if (atr != null) orbAtr[s] = atr;
     }
+
+    const vwapTrend: Record<string, VwapTrendContext> = {};
+    for (const s of UNIVERSE_SYMBOLS) {
+      const sma = computeSMA(closesBySymbol[s], VWAP_TREND_FILTER_DAYS);
+      const efficiency = computeTrendEfficiency(closesBySymbol[s], VWAP_TREND_FILTER_DAYS);
+      if (sma != null && efficiency != null) vwapTrend[s] = { sma, efficiency };
+    }
     if (Object.keys(orbAtr).length === 0) flag(`[${day}] ATR non calcolabile per nessun simbolo (storico daily insufficiente prima di questa data)`);
 
     let pairStats: PairStats[] = selectPairs(closesBySymbol);
@@ -218,7 +232,7 @@ async function run() {
     }
 
     let openingRanges: Record<string, OpeningRange> = {};
-    let dayCounters = { orbEntries: 0, orbExits: 0, vwapEntries: 0, vwapExits: 0, pairsEntries: 0, pairsExits: 0 };
+    let dayCounters = { orbEntries: 0, orbExits: 0, vwapEntries: 0, vwapExits: 0, pairsEntries: 0, pairsExits: 0, vwapPnl: 0 };
     const closeMs = new Date(session.closeUtc).getTime();
     const stoppedPairsToday = new Set<string>(); // raffreddamento post-stop, azzerato a ogni giorno
 
@@ -272,6 +286,7 @@ async function run() {
         totals.vwap.realized += ex.realizedPnl;
         totals.vwap.exits++;
         dayCounters.vwapExits++;
+        dayCounters.vwapPnl += ex.realizedPnl;
         totals.vwap.exitReasons[ex.reason] = (totals.vwap.exitReasons[ex.reason] ?? 0) + 1;
         vwapOpen = vwapOpen.filter((p) => p.id !== ex.position.id);
         strategyOf.delete(ex.position.id);
@@ -301,7 +316,7 @@ async function run() {
         const vwapStillOpenSymbols = new Set(vwapOpen.map((p) => p.symbol));
         let vwapEntries: ReturnType<typeof decideVwapEntries> = [];
         try {
-          vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpenSymbols, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpenSymbols.size);
+          vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpenSymbols, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpenSymbols.size, vwapTrend);
         } catch (e) {
           flag(`[${day} ${timeIso}] eccezione in decideVwapEntries: ${(e as Error).message}`);
         }
@@ -394,6 +409,7 @@ async function run() {
         totals[strat].realized += c.realizedPnl;
         totals[strat].exits++;
         totals[strat].exitReasons["eod_safety_net"] = (totals[strat].exitReasons["eod_safety_net"] ?? 0) + 1;
+        if (strat === "vwap") dayCounters.vwapPnl += c.realizedPnl;
       } else {
         flag(`[${day}] chiusura EOD per id ${c.id} senza strategia nota (bug di bookkeeping nel backtest, non nel prodotto)`);
       }
@@ -429,7 +445,7 @@ async function run() {
 
     console.log(
       `[${day}] orb: ${dayCounters.orbEntries} entrate/${dayCounters.orbExits} uscite | ` +
-        `vwap: ${dayCounters.vwapEntries} entrate/${dayCounters.vwapExits} uscite | ` +
+        `vwap: ${dayCounters.vwapEntries} entrate/${dayCounters.vwapExits} uscite (pnl=${dayCounters.vwapPnl}) | ` +
         `pairs: ${dayCounters.pairsEntries} entrate/${dayCounters.pairsExits} uscite | ` +
         `EOD: ${eodCloses.length} chiuse | posizioni residue: orb=${orbOpen.length} vwap=${vwapOpen.length} pairs=${pairsOpen.length}`
     );
