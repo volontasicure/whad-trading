@@ -125,7 +125,7 @@ export const STRATEGIES: Strategy[] = [
       { label: "Conferma volume", value: "1,8× medio", hint: "volume minimo sulla candela di rottura" },
       { label: "Stop loss", value: "0,5× range", hint: "metà dell'ampiezza del range di apertura" },
       { label: "Take profit", value: "2,0× range", hint: "target simmetrico al rischio assunto" },
-      { label: "Titoli max in portafoglio", value: "6 / 20", hint: "solo le rotture più ampie" },
+      { label: "Titoli max in portafoglio", value: `6 / ${MARKET.length}`, hint: "solo le rotture più ampie" },
     ],
     backtest: {
       net: 5860,
@@ -179,7 +179,7 @@ export const STRATEGIES: Strategy[] = [
       { label: "Target", value: "VWAP", hint: "chiusura al ritorno sulla media di giornata" },
       { label: "Stop loss", value: "−0,6%", hint: "oltre l'estremo della candela di ingresso" },
       { label: "Tempo massimo in posizione", value: "45 min", hint: "uscita a mercato se il rientro non arriva" },
-      { label: "Titoli max in portafoglio", value: "8 / 20", hint: "le estensioni più ampie dell'universo" },
+      { label: "Titoli max in portafoglio", value: `8 / ${MARKET.length}`, hint: "le estensioni più ampie dell'universo" },
     ],
     backtest: {
       net: 3120,
