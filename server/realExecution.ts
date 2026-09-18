@@ -97,6 +97,17 @@ interface AlpacaOrderResponse {
   status: string;
 }
 
+interface AlpacaPosition {
+  qty: string;
+}
+
+interface AlpacaClosedOrder {
+  id: string;
+  type: string;
+  status: string;
+  filled_avg_price: string | null;
+}
+
 interface AlpacaAccount {
   /** Capitale reale del conto (non buying_power: quello include il margine, tipicamente 4x
    *  l'equity su un conto Reg T — usarlo sizerebbe il conto reale a leva senza che nessuno
@@ -104,19 +115,110 @@ interface AlpacaAccount {
   equity: string;
 }
 
-/** Invia un ordine a mercato e prova a leggere il prezzo di fill reale (poche riprove brevi: i fill paper sono quasi sempre immediati, ma non garantiti nello stesso round-trip). */
+/** Alpaca rifiuta stop/limit price con più di 2 decimali sui titoli sopra 1$. */
+function roundToCent(price: number): number {
+  return Math.round(price * 100) / 100;
+}
+
+/** Poche riprove brevi per leggere il prezzo di fill reale: i fill paper sono quasi sempre immediati, ma non garantiti nello stesso round-trip. Condivisa tra ordini a mercato semplici e bracket. */
+async function pollFillPrice(orderId: string, initial: number | null): Promise<number | null> {
+  let fillPrice = initial;
+  for (let i = 0; i < 3 && fillPrice == null; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const check = await alpacaFetch<AlpacaOrderResponse>(`/v2/orders/${orderId}`);
+    if (check.filled_avg_price) fillPrice = Number(check.filled_avg_price);
+  }
+  return fillPrice;
+}
+
+/** Invia un ordine a mercato semplice (VWAP, pairs trading: uscite dinamiche, non esprimibili come stop/target fissi). */
 async function submitMarketOrder(symbol: string, side: "buy" | "sell", qty: number): Promise<{ orderId: string; fillPrice: number | null }> {
   const order = await alpacaFetch<AlpacaOrderResponse>("/v2/orders", {
     method: "POST",
     body: JSON.stringify({ symbol, side, qty, type: "market", time_in_force: "day" }),
   });
-  let fillPrice = order.filled_avg_price ? Number(order.filled_avg_price) : null;
-  for (let i = 0; i < 3 && fillPrice == null; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const check = await alpacaFetch<AlpacaOrderResponse>(`/v2/orders/${order.id}`);
-    if (check.filled_avg_price) fillPrice = Number(check.filled_avg_price);
-  }
+  const fillPrice = await pollFillPrice(order.id, order.filled_avg_price ? Number(order.filled_avg_price) : null);
   return { orderId: order.id, fillPrice };
+}
+
+/** Ingresso a mercato con stop-loss e take-profit nativi collegati in OCO (order_class "bracket"),
+ *  gestiti dal broker in tempo reale invece che dal polling a 5 minuti di decideOrbExits. Solo per
+ *  ORB: è l'unica strategia con stop/target fissi calcolati una volta sola all'ingresso — VWAP e
+ *  pairs trading hanno uscite dinamiche (ritorno al VWAP, z-score), non esprimibili come un singolo
+ *  prezzo di trigger. */
+async function submitBracketOrder(
+  symbol: string,
+  side: "buy" | "sell",
+  qty: number,
+  stopPrice: number,
+  targetPrice: number
+): Promise<{ orderId: string; fillPrice: number | null }> {
+  const order = await alpacaFetch<AlpacaOrderResponse>("/v2/orders", {
+    method: "POST",
+    body: JSON.stringify({
+      symbol,
+      side,
+      qty,
+      type: "market",
+      time_in_force: "day",
+      order_class: "bracket",
+      take_profit: { limit_price: roundToCent(targetPrice) },
+      stop_loss: { stop_price: roundToCent(stopPrice) },
+    }),
+  });
+  const fillPrice = await pollFillPrice(order.id, order.filled_avg_price ? Number(order.filled_avg_price) : null);
+  return { orderId: order.id, fillPrice };
+}
+
+/** Posizione aperta sul broker per un simbolo, o null se non esiste (404) — usato dalla riconciliazione per capire se un bracket ha già chiuso una posizione ORB prima di questo tick. Solo un vero 404 conta come "chiusa": qualunque altro errore va propagato, mai interpretato come chiusura silenziosa. */
+async function fetchOpenPositionQty(symbol: string): Promise<number | null> {
+  const creds = requireCredentials();
+  const res = await fetch(`${creds.baseUrl}/v2/positions/${symbol}`, {
+    headers: { "APCA-API-KEY-ID": creds.keyId, "APCA-API-SECRET-KEY": creds.secretKey },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Alpaca GET /v2/positions/${symbol} -> ${res.status} ${body}`);
+  }
+  const data = (await res.json()) as AlpacaPosition;
+  return Number(data.qty);
+}
+
+interface AlpacaAsset {
+  shortable: boolean;
+  easy_to_borrow: boolean;
+}
+
+/** Vero se il titolo è shortabile e facilmente reperibile in prestito sul broker — evita ordini
+ *  short che Alpaca rifiuterebbe o che accumulano costi di prestito su titoli hard-to-borrow.
+ *  Controllo solo lato esecuzione reale: i lab restano simulati, non hanno questo vincolo. */
+async function isShortable(symbol: string): Promise<boolean> {
+  const asset = await alpacaFetch<AlpacaAsset>(`/v2/assets/${symbol}`);
+  return asset.shortable && asset.easy_to_borrow;
+}
+
+/** Scarta i candidati che aprirebbero (anche solo su una gamba, per i pairs) una posizione
+ *  SHORT su un titolo non shortabile/hard-to-borrow. Per i pairs, se una gamba non passa il
+ *  controllo si scarta l'intera coppia: mai aprire una gamba orfana di proposito. Nota: il
+ *  filtro è applicato dopo che decideEntries ha già scelto e ordinato i candidati per i
+ *  freeSlots disponibili — in una giornata con titoli hard-to-borrow, l'esecuzione reale può
+ *  usare meno slot del lab corrispondente quel giorno, non li rimpiazza con il candidato successivo. */
+async function filterShortableCandidates<T>(
+  candidates: T[],
+  sidesOf: (c: T) => { symbol: string; side: "LONG" | "SHORT" }[]
+): Promise<T[]> {
+  const checked = await Promise.all(
+    candidates.map(async (c) => {
+      const shortSymbols = sidesOf(c)
+        .filter((s) => s.side === "SHORT")
+        .map((s) => s.symbol);
+      if (shortSymbols.length === 0) return { c, ok: true };
+      const results = await Promise.all(shortSymbols.map((symbol) => isShortable(symbol)));
+      return { c, ok: results.every(Boolean) };
+    })
+  );
+  return checked.filter((x) => x.ok).map((x) => x.c);
 }
 
 async function openRealPosition(params: {
@@ -131,7 +233,11 @@ async function openRealPosition(params: {
   pairKeyVal: string | null;
   now: Date;
 }): Promise<void> {
-  const { orderId, fillPrice } = await submitMarketOrder(params.symbol, params.side === "LONG" ? "buy" : "sell", params.qty);
+  const brokerSide = params.side === "LONG" ? "buy" : "sell";
+  const useBracket = params.strategyId === ORB_STRATEGY_ID && params.stopPrice != null && params.targetPrice != null;
+  const { orderId, fillPrice } = useBracket
+    ? await submitBracketOrder(params.symbol, brokerSide, params.qty, params.stopPrice!, params.targetPrice!)
+    : await submitMarketOrder(params.symbol, brokerSide, params.qty);
   const entryPrice = fillPrice ?? params.fallbackPrice;
   await db()`
     INSERT INTO real_positions
@@ -162,6 +268,68 @@ async function closeRealPosition(params: {
         realized_pnl = ${realizedPnl}, exit_reason = ${params.reason}, broker_exit_order_id = ${orderId}
     WHERE id = ${params.id}
   `;
+}
+
+/** Registra una chiusura già eseguita dal broker (gamba del bracket già filled) — nessun nuovo ordine inviato, a differenza di closeRealPosition. */
+async function recordBrokerClose(params: {
+  id: number;
+  side: "LONG" | "SHORT";
+  qty: number;
+  entryPrice: number;
+  exitPrice: number;
+  reason: string;
+  brokerOrderId: string;
+  now: Date;
+}): Promise<void> {
+  const dir = params.side === "LONG" ? 1 : -1;
+  const realizedPnl = Math.round(params.qty * (params.exitPrice - params.entryPrice) * dir);
+  await db()`
+    UPDATE real_positions
+    SET status = 'closed', exit_price = ${params.exitPrice}, exit_time = ${params.now.toISOString()},
+        realized_pnl = ${realizedPnl}, exit_reason = ${params.reason}, broker_exit_order_id = ${params.brokerOrderId}
+    WHERE id = ${params.id}
+  `;
+}
+
+/** Per ogni posizione ORB reale aperta, controlla se il bracket order l'ha già chiusa sul broker
+ *  prima di questo tick (protezione in tempo reale, non al prossimo giro di polling). Se sì,
+ *  registra la chiusura con i dati reali del fill e la esclude dal set restituito, così
+ *  decideOrbExits non la rivede più — evita una doppia chiusura (un secondo ordine su una
+ *  posizione che il broker ha già azzerato). Se il 404 su /v2/positions arriva ma l'ordine di
+ *  chiusura non si trova ancora (lag di propagazione), la posizione non viene toccata in questo
+ *  tick: niente stillOpen (decideOrbExits non le manderebbe un ordine a vuoto) e niente chiusura
+ *  senza dati reali — si riprova al tick successivo. */
+async function reconcileOrbBrokerCloses(
+  openPositions: OrbOpenPosition[],
+  now: Date
+): Promise<{ stillOpen: OrbOpenPosition[]; reconciledCount: number }> {
+  const stillOpen: OrbOpenPosition[] = [];
+  let reconciledCount = 0;
+  for (const pos of openPositions) {
+    const qty = await fetchOpenPositionQty(pos.symbol);
+    if (qty != null) {
+      stillOpen.push(pos);
+      continue;
+    }
+    const closedOrders = await alpacaFetch<AlpacaClosedOrder[]>(
+      `/v2/orders?status=closed&symbols=${pos.symbol}&direction=desc&limit=5`
+    );
+    const fill = closedOrders.find((o) => o.status === "filled" && (o.type === "stop" || o.type === "limit"));
+    if (!fill || fill.filled_avg_price == null) continue; // in attesa che l'ordine risulti propagato, riprova al prossimo tick
+
+    await recordBrokerClose({
+      id: pos.id,
+      side: pos.side,
+      qty: pos.qty,
+      entryPrice: pos.entryPrice,
+      exitPrice: Number(fill.filled_avg_price),
+      reason: fill.type === "stop" ? "stop" : "target",
+      brokerOrderId: fill.id,
+      now,
+    });
+    reconciledCount++;
+  }
+  return { stillOpen, reconciledCount };
 }
 
 /** breakoutStrength di orb.ts, ricalcolato qui (mai esposto dal decideEntries di orb.ts): distanza dal bordo del range rotto, in % dell'ampiezza del range. */
@@ -204,12 +372,17 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     .filter((r) => r.strategy_id === PAIRS_STRATEGY_ID && r.pair_key)
     .map((r) => ({ id: r.id, pairKey: r.pair_key!, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price }));
 
+  // Riconciliazione ORB: prima di controllare stop/target a prezzo, verifica se un bracket
+  // order ha già chiuso una posizione sul broker tra un tick e l'altro (protezione in tempo
+  // reale). Le posizioni già chiuse così non entrano più in decideOrbExits, niente doppio ordine.
+  const { stillOpen: orbOpenReconciled, reconciledCount: orbReconciledCloses } = await reconcileOrbBrokerCloses(orbOpen, ctx.now);
+
   // --- Uscite: per ogni strategia con posizioni reali aperte, non solo quella scelta oggi ---
   const vwapExits = decideVwapExits(vwapOpen, ctx.vwapSnapshots, ctx.now);
-  const orbExits = decideOrbExits(orbOpen, ctx.prices);
+  const orbExits = decideOrbExits(orbOpenReconciled, ctx.prices);
   const pairsExits = decidePairsExits(pairsOpen, ctx.prices, ctx.pairStatsByKey);
 
-  let exitCount = 0;
+  let exitCount = orbReconciledCloses;
   for (const exit of vwapExits) {
     await closeRealPosition({
       id: exit.position.id,
@@ -266,7 +439,8 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
       const freeSlots = VWAP_MAX_POSITIONS - stillOpen.size;
       // ctx.vwapTrend disponibile ma NON passato qui apposta — stesso interruttore spento di
       // api/cron/tick.ts, vedi il commento lì.
-      const candidates = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
+      const rawCandidates = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
+      const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
       const sizingInput: SizingCandidate[] = candidates.map((c) => ({ symbol: c.symbol, price: c.entryPrice, conviction: Math.abs(c.distancePct) }));
       const sized = sizeByConviction(sizingInput, capital, VWAP_MAX_POSITIONS);
       for (const c of candidates) {
@@ -287,7 +461,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         entryCount++;
       }
     } else if (chosenStrategyId === ORB_STRATEGY_ID) {
-      const stillOpen = new Set(orbOpen.filter((p) => !orbExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
+      const stillOpen = new Set(orbOpenReconciled.filter((p) => !orbExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
       const freeSlots = ORB_MAX_POSITIONS - stillOpen.size;
       const inputs: Record<string, OrbEntryInputs> = {};
       for (const symbol of UNIVERSE_SYMBOLS) {
@@ -299,7 +473,8 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         const avgVol = volumes.reduce((s, v) => s + v, 0) / volumes.length;
         inputs[symbol] = { price, openingRange: range, atrPct: atr, avgBarVolume: avgVol, latestBarVolume: volumes[volumes.length - 1] };
       }
-      const candidates = decideOrbEntries(UNIVERSE_SYMBOLS, stillOpen, inputs, freeSlots);
+      const rawCandidates = decideOrbEntries(UNIVERSE_SYMBOLS, stillOpen, inputs, freeSlots);
+      const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
       const sizingInput: SizingCandidate[] = candidates.map((c) => {
         const range = ctx.openingRanges[c.symbol];
         const conviction = range ? Math.abs(orbBreakoutStrength(c.entryPrice, c.side, range)) : 0;
@@ -328,7 +503,8 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
       const stillOpenKeys = new Set(pairsOpen.filter((leg) => !pairsExits.some((e) => e.legIds.includes(leg.id))).map((leg) => leg.pairKey));
       const freeSlots = MAX_PAIRS - stillOpenKeys.size;
       const pairsExcludedKeys = new Set([...stillOpenKeys, ...ctx.stoppedPairsToday]);
-      const candidates = decidePairsEntries(ctx.pairStats, pairsExcludedKeys, ctx.prices, freeSlots);
+      const rawCandidates = decidePairsEntries(ctx.pairStats, pairsExcludedKeys, ctx.prices, freeSlots);
+      const candidates = await filterShortableCandidates(rawCandidates, (c) => c.legs);
       // Una coppia = un candidato di sizing, prezzo fittizio 1 -> la qty restituita è
       // direttamente il budget in dollari per la coppia, diviso poi a metà tra le due gambe
       // (stesso schema "capitale diviso a metà" di pairsTrading.ts, solo con budget variabile
