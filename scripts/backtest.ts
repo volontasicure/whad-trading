@@ -78,6 +78,14 @@ if (!POSTGRES_URL) {
 }
 const sql = neon(POSTGRES_URL);
 
+// Con ORB_INTRABAR=1 gli stop/target ORB sono valutati sul massimo/minimo di ogni barra a 5
+// minuti invece che sulla sola chiusura: simula gli stop nativi del broker (bracket order,
+// attivi dal 18/9/2026 sul conto reale), che scattano su qualunque scambio, non solo sul
+// prezzo campionato ogni 5 minuti come fa il lab. Stesso barra: se stop e target cadono nella
+// stessa barra si assume lo stop (ipotesi prudente); gap oltre lo stop = fill all'apertura.
+const ORB_INTRABAR = process.env.ORB_INTRABAR === '1';
+if (ORB_INTRABAR) console.log("ORB_INTRABAR attivo: stop/target ORB su massimo/minimo delle barre\n");
+
 interface AlpacaIntradayBarRaw {
   t: string;
   o: number;
@@ -152,6 +160,33 @@ async function loadDailyClosesBeforeDate(beforeDateIso: string): Promise<Record<
 }
 
 interface SimOrbPos extends OrbOpenPosition {}
+
+function decideOrbExitsIntrabar(
+  open: SimOrbPos[],
+  barNow: Record<string, AlpacaIntradayBarRaw | undefined>
+): ReturnType<typeof decideOrbExits> {
+  const out: ReturnType<typeof decideOrbExits> = [];
+  for (const pos of open) {
+    const bar = barNow[pos.symbol];
+    if (!bar) continue;
+    const long = pos.side === 'LONG';
+    const stopHit = long ? bar.l <= pos.stopPrice : bar.h >= pos.stopPrice;
+    const targetHit = long ? bar.h >= pos.targetPrice : bar.l <= pos.targetPrice;
+    if (!stopHit && !targetHit) continue;
+    const isStop = stopHit; // stessa barra: prevale lo stop
+    const level = isStop ? pos.stopPrice : pos.targetPrice;
+    let exitPrice = level;
+    if (isStop) exitPrice = long ? Math.min(level, bar.o) : Math.max(level, bar.o);
+    const dir = long ? 1 : -1;
+    out.push({
+      position: pos,
+      exitPrice,
+      realizedPnl: Math.round(pos.qty * (exitPrice - pos.entryPrice) * dir),
+      reason: isStop ? 'stop' : 'target',
+    });
+  }
+  return out;
+}
 interface SimVwapPos extends VwapOpenPosition {}
 interface SimPairLeg extends OpenLeg {}
 
@@ -270,7 +305,17 @@ async function run() {
         flag(`[${day} ${timeIso}] eccezione in decideVwapExits: ${(e as Error).message}`);
       }
       try {
-        orbExits = decideOrbExits(orbOpen, prices);
+        if (ORB_INTRABAR) {
+          const barNow: Record<string, AlpacaIntradayBarRaw | undefined> = {};
+          for (const sym of UNIVERSE_SYMBOLS) {
+            const bs = barsUpToNow[sym];
+            const last = bs[bs.length - 1];
+            if (last && last.t === timeIso) barNow[sym] = last;
+          }
+          orbExits = decideOrbExitsIntrabar(orbOpen, barNow);
+        } else {
+          orbExits = decideOrbExits(orbOpen, prices);
+        }
       } catch (e) {
         flag(`[${day} ${timeIso}] eccezione in decideOrbExits: ${(e as Error).message}`);
       }
