@@ -140,17 +140,12 @@ export interface BrokerStatus {
   maskedKey: string;
 }
 
-export interface OrderRequest {
-  symbol: string;
-  side: "buy" | "sell";
-  qty: number;
-  type: "market" | "limit";
-  limitPrice?: number;
-}
-
 /**
  * Un'unica interfaccia, una implementazione per broker (Alpaca prima, poi IBKR/Binance).
- * La UI non deve mai importare un SDK di broker. Vedi API.md per il contratto originale.
+ * La UI non deve mai importare un SDK di broker. Vedi API.md per il contratto originale —
+ * submitOrder/closePosition rimossi il 18/9 (nessuna UI di trading manuale li chiamava mai,
+ * l'esecuzione reale parla con Alpaca direttamente da server/realExecution.ts): se servirà un
+ * pannello di trading manuale, si riaggiungono facilmente.
  */
 export interface BrokerAdapter {
   id: string;
@@ -159,8 +154,6 @@ export interface BrokerAdapter {
   getPositions(portfolioId: string): Promise<Position[]>;
   getRealizedPnl(portfolioId: string, period: "day" | "week" | "month" | "inception"): Promise<number>;
   getExecutions(portfolioId: string, since: string): Promise<Execution[]>;
-  submitOrder(o: OrderRequest): Promise<{ orderId: string }>;
-  closePosition(symbol: string): Promise<{ orderId: string }>;
   /** Ritorna una funzione di unsubscribe. */
   streamQuotes(symbols: string[], cb: (q: Quote) => void): () => void;
   marketClock(): Promise<{ isOpen: boolean; nextClose: string; nextOpen: string }>;

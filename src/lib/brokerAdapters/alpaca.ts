@@ -28,10 +28,6 @@ export const alpacaAdapter: BrokerAdapter = {
 
   getExecutions: (_portfolioId, since) => api(`/executions?since=${encodeURIComponent(since)}`),
 
-  submitOrder: (o) => api("/orders", { method: "POST", body: JSON.stringify(o) }),
-
-  closePosition: (symbol) => api(`/positions/${encodeURIComponent(symbol)}`, { method: "DELETE" }),
-
   marketClock: () => api("/clock"),
 
   streamQuotes: (_symbols: string[], _cb: (q: Quote) => void) => {
