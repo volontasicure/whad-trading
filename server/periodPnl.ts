@@ -54,9 +54,10 @@ export async function computeLabPeriodPnl(): Promise<Record<string, PeriodPnl>> 
  * (il proxy "cosa avrebbe fatto il lab scelto", pre-esecuzione reale): ora che gli ordini
  * sono davvero piazzati, mischiare un netto finto pre-esecuzione con uno vero post-esecuzione
  * produrrebbe una serie incoerente — meglio azzerare la storia (reale = 0 prima di oggi, che
- * è anche la verità) e ripartire da qui. Diverso dal "Portafoglio reale" in LiveView, che
- * legge la portfolio history di Alpaca (approssima realized+unrealized, limite noto in
- * api/broker/pnl.ts): questo è il realized puro calcolato da noi sui fill effettivi.
+ * è anche la verità) e ripartire da qui. Stessa fonte usata anche da api/broker/pnl.ts per il
+ * "Portafoglio reale" in LiveView (day/week/month/inception → lastSession/previousWeek/
+ * previousMonth/sinceInception) — un'unica definizione di realized per tutta l'app, niente
+ * più l'approssimazione dalla portfolio history di Alpaca (realized+unrealized mescolati).
  */
 export async function computeRealPeriodPnl(): Promise<PeriodPnl> {
   const rows = (await db().query(

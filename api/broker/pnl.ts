@@ -1,36 +1,33 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { alpacaFetch } from "../../server/alpaca.js";
+import { computeRealPeriodPnl } from "../../server/periodPnl.js";
 
-interface AlpacaPortfolioHistory {
-  profit_loss: number[];
-  timestamp: number[];
-}
-
-const PERIOD_PARAMS: Record<string, { period: string; timeframe: string }> = {
-  day: { period: "1D", timeframe: "15Min" },
-  week: { period: "1W", timeframe: "1D" },
-  month: { period: "1M", timeframe: "1D" },
-  inception: { period: "all", timeframe: "1D" },
-};
+const VALID_PERIODS = new Set(["day", "week", "month", "inception"]);
 
 /**
- * Approssimazione: la portfolio history di Alpaca riflette la variazione di equity
- * (realized + unrealized), non solo il realized "incassato" richiesto dalla spec.
- * Isolare il solo realized richiederebbe lot-matching sulle FILL — non ancora implementato.
+ * Realized P&L del conto reale calcolato da noi su real_positions (server/periodPnl.ts,
+ * computeRealPeriodPnl), non più dalla portfolio history di Alpaca (che mescola realized e
+ * unrealized). Nel nostro modello ogni riga è un round-trip completo (mai scale-in/out
+ * parziali), quindi il realized per fill è già esatto — non serve lot-matching sui dati del
+ * broker.
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const period = typeof req.query.period === "string" ? req.query.period : "day";
-  const params = PERIOD_PARAMS[period];
-  if (!params) {
+  if (!VALID_PERIODS.has(period)) {
     res.status(400).json({ error: `periodo non valido: ${period}` });
     return;
   }
 
   try {
-    const qs = new URLSearchParams({ period: params.period, timeframe: params.timeframe });
-    const history = await alpacaFetch<AlpacaPortfolioHistory>(`/v2/account/portfolio/history?${qs.toString()}`);
-    const value = (history.profit_loss ?? []).reduce((sum, v) => sum + (v ?? 0), 0);
-    res.status(200).json({ value, approximate: true });
+    const pnl = await computeRealPeriodPnl();
+    const value =
+      period === "day"
+        ? pnl.lastSession
+        : period === "week"
+          ? pnl.previousWeek
+          : period === "month"
+            ? pnl.previousMonth
+            : pnl.sinceInception;
+    res.status(200).json({ value });
   } catch (err) {
     res.status(502).json({ error: (err as Error).message });
   }
