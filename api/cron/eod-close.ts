@@ -13,9 +13,63 @@ interface AlpacaClock {
 interface AlpacaPosition {
   symbol: string;
   unrealized_pl: string;
+  current_price: string;
+}
+
+interface AlpacaOrder {
+  id: string;
+  filled_avg_price: string | null;
 }
 
 const CLOSE_WINDOW_MINUTES = 20;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Le gambe stop/target dei bracket order (ORB reale) tengono "prenotate" le azioni: finché
+ * sono aperte, Alpaca rifiuta la chiusura manuale della posizione. Il 18/9/2026 questo ha
+ * fatto fallire ogni tentativo EOD (closed 0, failed 4) e 4 posizioni profittevoli hanno
+ * passato il weekend. Va quindi annullato ogni ordine aperto sul simbolo prima di chiudere,
+ * aspettando che l'annullamento (asincrono lato broker) sia effettivo.
+ */
+async function cancelOpenOrders(symbol: string): Promise<void> {
+  const openOrders = await alpacaFetch<AlpacaOrder[]>(`/v2/orders?status=open&symbols=${encodeURIComponent(symbol)}&nested=false&limit=50`);
+  await Promise.allSettled(openOrders.map((o) => alpacaFetch(`/v2/orders/${o.id}`, { method: "DELETE" })));
+  for (let i = 0; i < 6; i++) {
+    const still = await alpacaFetch<AlpacaOrder[]>(`/v2/orders?status=open&symbols=${encodeURIComponent(symbol)}&nested=false&limit=50`);
+    if (still.length === 0) return;
+    await sleep(500);
+  }
+}
+
+/** Chiude la posizione sul broker e registra l'uscita nelle righe real_positions aperte per quel simbolo (prima non veniva registrata: restavano "open" nel DB per sempre e il realized non entrava mai nei conteggi). */
+async function closeAndRecord(p: AlpacaPosition): Promise<void> {
+  await cancelOpenOrders(p.symbol);
+  const order = await alpacaFetch<AlpacaOrder>(`/v2/positions/${encodeURIComponent(p.symbol)}`, { method: "DELETE" });
+
+  let exitPrice = order.filled_avg_price ? Number(order.filled_avg_price) : null;
+  for (let i = 0; i < 3 && exitPrice == null; i++) {
+    await sleep(500);
+    const check = await alpacaFetch<AlpacaOrder>(`/v2/orders/${order.id}`);
+    if (check.filled_avg_price) exitPrice = Number(check.filled_avg_price);
+  }
+  const price = exitPrice ?? Number(p.current_price);
+
+  const rows = (await db()`
+    SELECT id, side, qty::float8 AS qty, entry_price::float8 AS entry_price
+    FROM real_positions WHERE symbol = ${p.symbol} AND status = 'open'
+  `) as unknown as { id: number; side: "LONG" | "SHORT"; qty: number; entry_price: number }[];
+  for (const r of rows) {
+    const dir = r.side === "LONG" ? 1 : -1;
+    const realizedPnl = Math.round(r.qty * (price - r.entry_price) * dir);
+    await db()`
+      UPDATE real_positions
+      SET status = 'closed', exit_price = ${price}, exit_time = now(), realized_pnl = ${realizedPnl},
+          exit_reason = 'eod', broker_exit_order_id = ${order.id}
+      WHERE id = ${r.id}
+    `;
+  }
+}
 
 /**
  * Scrive la riga sessions di oggi (storico reale del debriefing) — una volta sola, qui,
@@ -107,11 +161,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const positions = await alpacaFetch<AlpacaPosition[]>("/v2/positions");
     const toClose = positions.filter((p) => Number(p.unrealized_pl) > 0);
 
-    const results = await Promise.allSettled(
-      toClose.map((p) => alpacaFetch(`/v2/positions/${encodeURIComponent(p.symbol)}`, { method: "DELETE" }))
-    );
+    const results = await Promise.allSettled(toClose.map((p) => closeAndRecord(p)));
     const closed = results.filter((r) => r.status === "fulfilled").length;
     const failed = results.length - closed;
+    const errors = results.flatMap((r, i) =>
+      r.status === "rejected" ? [`${toClose[i].symbol}: ${(r.reason as Error).message}`] : []
+    );
 
     // Best-effort: un problema qui non deve far apparire fallita la chiusura reale sopra,
     // che è già andata a buon fine a questo punto.
@@ -127,6 +182,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       evaluated: positions.length,
       closed,
       failed,
+      errors,
       symbols: toClose.map((p) => p.symbol),
       session,
     });
