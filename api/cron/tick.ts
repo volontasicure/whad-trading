@@ -543,6 +543,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         vwapBars,
         pairStats,
         pairStatsByKey,
+        stoppedPairsToday: new Set(stoppedPairsToday),
         openRows: realOpenRows,
       });
       realNote = realResult.skipped

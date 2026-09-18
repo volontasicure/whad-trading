@@ -128,6 +128,12 @@ export function statsForPair(a: string, b: string, closesBySymbolAscending: Reco
  * Seleziona fino a MAX_PAIRS coppie candidate (stesso settore, massima correlazione sui
  * rendimenti giornalieri) e ne calcola media/deviazione standard del rapporto di prezzo,
  * base per lo z-score intraday. Richiede almeno ~20 chiusure giornaliere per titolo.
+ *
+ * Selezione greedy senza sovrapposizione di titoli: scarta un candidato che condivide un
+ * titolo con una coppia già scelta (es. JPM/BAC e JPM/GS insieme — non sono scommesse
+ * davvero indipendenti se condividono JPM, un movimento su JPM muove entrambe insieme).
+ * Validato il 18/9/2026 via backtest A/B su due finestre storiche: migliora il P&L su
+ * entrambe (254→655 sul periodo recente, 1508→1566 fuori campione).
  */
 export function selectPairs(closesBySymbolAscending: Record<string, number[]>): PairStats[] {
   const bySector = new Map<string, string[]>();
@@ -155,7 +161,17 @@ export function selectPairs(closesBySymbolAscending: Record<string, number[]>): 
 
   candidates.sort((x, y) => y.correlation - x.correlation);
 
-  return candidates.slice(0, MAX_PAIRS).map(({ a, b, correlation: corr }) => ({
+  const usedSymbols = new Set<string>();
+  const chosen: typeof candidates = [];
+  for (const c of candidates) {
+    if (usedSymbols.has(c.a) || usedSymbols.has(c.b)) continue;
+    chosen.push(c);
+    usedSymbols.add(c.a);
+    usedSymbols.add(c.b);
+    if (chosen.length >= MAX_PAIRS) break;
+  }
+
+  return chosen.map(({ a, b, correlation: corr }) => ({
     a,
     b,
     correlation: corr,

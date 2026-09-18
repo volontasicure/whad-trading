@@ -70,6 +70,11 @@ export interface RealExecutionContext {
   vwapBars: Record<string, { t: string; c: number }[]>;
   pairStats: PairStats[];
   pairStatsByKey: Record<string, PairStats>;
+  /** Coppie uscite in stop oggi (raffreddamento post-stop, stesso stato già calcolato e
+   *  cachato da tick.ts per il lab in lab_state — passato qui invece di ricalcolato, per non
+   *  duplicare la query). Prima del 18/9/2026 questo controllo esisteva solo lato lab: il
+   *  conto reale poteva ririentrare senza limiti su una coppia appena stoppata. */
+  stoppedPairsToday: Set<string>;
   /** Righe già aperte in real_positions, lette una sola volta da tick.ts (stesso pattern di lab_positions). */
   openRows: RealPositionRow[];
 }
@@ -322,7 +327,8 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     } else if (chosenStrategyId === PAIRS_STRATEGY_ID) {
       const stillOpenKeys = new Set(pairsOpen.filter((leg) => !pairsExits.some((e) => e.legIds.includes(leg.id))).map((leg) => leg.pairKey));
       const freeSlots = MAX_PAIRS - stillOpenKeys.size;
-      const candidates = decidePairsEntries(ctx.pairStats, stillOpenKeys, ctx.prices, freeSlots);
+      const pairsExcludedKeys = new Set([...stillOpenKeys, ...ctx.stoppedPairsToday]);
+      const candidates = decidePairsEntries(ctx.pairStats, pairsExcludedKeys, ctx.prices, freeSlots);
       // Una coppia = un candidato di sizing, prezzo fittizio 1 -> la qty restituita è
       // direttamente il budget in dollari per la coppia, diviso poi a metà tra le due gambe
       // (stesso schema "capitale diviso a metà" di pairsTrading.ts, solo con budget variabile
