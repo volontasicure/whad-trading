@@ -86,6 +86,15 @@ const sql = neon(POSTGRES_URL);
 const ORB_INTRABAR = process.env.ORB_INTRABAR === '1';
 if (ORB_INTRABAR) console.log("ORB_INTRABAR attivo: stop/target ORB su massimo/minimo delle barre\n");
 
+// Varianti da valutare al checkpoint del 21/9/2026 (nessuna è attiva in produzione):
+// EXP_ORB_STOP_MULT=0.75 sposta lo stop ORB a 0,75× l'ampiezza del range (default 0,5, target invariato);
+// EXP_PAIRS_DELAY_MIN=20 vieta nuovi ingressi pairs nei primi 20 minuti di seduta.
+const EXP_ORB_STOP_MULT = process.env.EXP_ORB_STOP_MULT ? Number(process.env.EXP_ORB_STOP_MULT) : null;
+const EXP_PAIRS_DELAY_MIN = process.env.EXP_PAIRS_DELAY_MIN ? Number(process.env.EXP_PAIRS_DELAY_MIN) : 0;
+if (EXP_ORB_STOP_MULT != null) console.log(`EXP_ORB_STOP_MULT=${EXP_ORB_STOP_MULT}`);
+if (EXP_PAIRS_DELAY_MIN > 0) console.log(`EXP_PAIRS_DELAY_MIN=${EXP_PAIRS_DELAY_MIN}`);
+const dailyNet: Record<"orb" | "vwap" | "pairs", number[]> = { orb: [], vwap: [], pairs: [] };
+
 interface AlpacaIntradayBarRaw {
   t: string;
   o: number;
@@ -215,6 +224,7 @@ async function run() {
   const strategyOf = new Map<number, "orb" | "vwap" | "pairs">();
 
   for (const day of tradingDays) {
+    const realizedBefore = { orb: totals.orb.realized, vwap: totals.vwap.realized, pairs: totals.pairs.realized };
     const session = await fetchMarketSession(day);
     if (!session) {
       flag(`[${day}] nessuna sessione nel calendario Alpaca (inatteso per un trading day)`);
@@ -392,7 +402,13 @@ async function run() {
         }
         for (const e of orbEntries) {
           const id = nextId++;
-          orbOpen.push({ id, symbol: e.symbol, side: e.side, qty: e.qty, entryPrice: e.entryPrice, stopPrice: e.stopPrice, targetPrice: e.targetPrice });
+          let stopPrice = e.stopPrice;
+          const range = openingRanges[e.symbol];
+          if (EXP_ORB_STOP_MULT != null && range) {
+            const width = range.high - range.low;
+            stopPrice = e.side === "LONG" ? e.entryPrice - EXP_ORB_STOP_MULT * width : e.entryPrice + EXP_ORB_STOP_MULT * width;
+          }
+          orbOpen.push({ id, symbol: e.symbol, side: e.side, qty: e.qty, entryPrice: e.entryPrice, stopPrice, targetPrice: e.targetPrice });
           strategyOf.set(id, "orb");
           totals.orb.entries++;
           dayCounters.orbEntries++;
@@ -402,7 +418,10 @@ async function run() {
         const pairsExcludedKeys = new Set([...pairsStillOpenKeys, ...stoppedPairsToday]);
         let pairsEntries: ReturnType<typeof decidePairsEntries> = [];
         try {
-          pairsEntries = decidePairsEntries(pairStats, pairsExcludedKeys, prices, MAX_PAIRS - pairsStillOpenKeys.size);
+          const minutesFromOpen = (now.getTime() - openMs) / 60_000;
+          if (minutesFromOpen >= EXP_PAIRS_DELAY_MIN) {
+            pairsEntries = decidePairsEntries(pairStats, pairsExcludedKeys, prices, MAX_PAIRS - pairsStillOpenKeys.size);
+          }
         } catch (e) {
           flag(`[${day} ${timeIso}] eccezione in decidePairsEntries: ${(e as Error).message}`);
         }
@@ -488,6 +507,10 @@ async function run() {
     pairsOpen = pairsOpen.filter((l) => !pairEodLegIds.has(l.id));
     const eodCloses = [...singleCloses, ...[...pairEodLegIds].map((id) => ({ id }))];
 
+    dailyNet.orb.push(totals.orb.realized - realizedBefore.orb);
+    dailyNet.vwap.push(totals.vwap.realized - realizedBefore.vwap);
+    dailyNet.pairs.push(totals.pairs.realized - realizedBefore.pairs);
+
     console.log(
       `[${day}] orb: ${dayCounters.orbEntries} entrate/${dayCounters.orbExits} uscite | ` +
         `vwap: ${dayCounters.vwapEntries} entrate/${dayCounters.vwapExits} uscite (pnl=${dayCounters.vwapPnl}) | ` +
@@ -500,6 +523,39 @@ async function run() {
   for (const [name, t] of Object.entries(totals)) {
     console.log(`${name}: ${t.entries} entrate, ${t.exits} uscite, P&L realizzato = ${t.realized}, motivi uscita:`, t.exitReasons);
   }
+  // Regole di scelta giornaliera della strategia (analogo del debriefing): P&L che si sarebbe
+  // ottenuto scegliendo ogni giorno una strategia con la regola indicata, calcolato sui risultati
+  // giornalieri del backtest (lab). Solo indicativo: le sedute sono poche.
+  const ids = ["orb", "vwap", "pairs"] as const;
+  const n = dailyNet.orb.length;
+  const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
+  const rule = (label: string, pick: (d: number) => (typeof ids)[number] | null) => {
+    let total = 0;
+    let scelte = 0;
+    for (let d = 1; d < n; d++) {
+      const p = pick(d);
+      if (!p) continue;
+      total += dailyNet[p][d];
+      scelte++;
+    }
+    console.log(`  ${label}: ${total} (su ${scelte} sedute)`);
+  };
+  const bestBy = (window: number) => (d: number) => {
+    const from = Math.max(0, d - window);
+    return ids.reduce((best, id) => (sum(dailyNet[id].slice(from, d)) > sum(dailyNet[best].slice(from, d)) ? id : best), ids[0]);
+  };
+  console.log("\n=== Regole di scelta giornaliera (P&L lab, seduta 2..N) ===");
+  for (const id of ids) rule(`sempre ${id}`, () => id);
+  rule("vincitore di ieri (1 seduta)", bestBy(1));
+  rule("vincitore ultime 5 sedute", bestBy(5));
+  rule("vincitore ultime 20 sedute", bestBy(20));
+  let mediaTot = 0;
+  for (let d = 1; d < n; d++) mediaTot += (dailyNet.orb[d] + dailyNet.vwap[d] + dailyNet.pairs[d]) / 3;
+  console.log(`  diversificata (1/3 ciascuna): ${Math.round(mediaTot)}`);
+  let oracolo = 0;
+  for (let d = 1; d < n; d++) oracolo += Math.max(dailyNet.orb[d], dailyNet.vwap[d], dailyNet.pairs[d]);
+  console.log(`  oracolo (migliore del giorno, irrealizzabile): ${oracolo}`);
+
   console.log(`\nAnomalie rilevate: ${anomalies.length}`);
   for (const a of anomalies) console.log(" -", a);
   if (anomalies.length === 0) console.log("Nessuna anomalia rilevata sui giorni testati.");
