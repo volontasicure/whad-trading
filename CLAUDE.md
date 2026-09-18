@@ -78,9 +78,11 @@ Il design handoff originale vive in `../Interfaccia trading multi-strategia/desi
 - **Non implementato**: `streamQuotes` (richiede una connessione persistente, incompatibile con le funzioni serverless Vercel — serve un servizio a lunga esecuzione separato, vedi sotto).
 - Variabili d'ambiente richieste (solo server-side, mai `VITE_*`): `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, `ALPACA_ENV` (`paper`/`live`), `CRON_SECRET` (per `api/cron/*`). Vedi `.env.example`.
 
-### Cron EOD: limite noto sull'ora legale
+### Cron EOD: il Vercel Cron nativo non veniva mai invocato — spostato su GitHub Actions
 
-`api/cron/eod-close.ts` gira una volta al giorno via Vercel Cron (piano Hobby: un solo orario UTC fisso, niente cron più frequenti). La chiusura NYSE (16:00 ET) cade a un'ora UTC diversa secondo l'ora legale USA (20:00 UTC in EDT, marzo-novembre; 21:00 UTC in EST, novembre-marzo). Lo schedule è tarato su EDT: nei mesi EST il mercato risulterà già chiuso quando il cron parte e la chiusura verrà saltata (la funzione verifica sempre `marketClock()` reale prima di agire, quindi salta in sicurezza invece di chiudere posizioni all'orario sbagliato). Per coprire entrambi i periodi servirebbe un cron più frequente (piano Pro) o uno scheduler timezone-aware esterno.
+Scoperto il 18/9/2026: `vercel.json` registra correttamente `/api/cron/eod-close` (confermato da `vercel crons ls`), ma i log Vercel delle invocazioni non mostravano **nessuna** chiamata reale dello scheduler in 72 ore — solo una chiamata manuale di test. Sintomo: la tabella `sessions` (storico sedute) è rimasta vuota dal go-live, e le posizioni reali profittevoli non si chiudevano mai da sole a fine seduta (es. AAPL/TMO rimaste aperte durante la notte del 17→18/9). Causa non diagnosticabile fino in fondo da CLI (serve la dashboard Vercel per lo storico dei tentativi); piuttosto che investigare oltre, applicata la stessa lezione già imparata con `tick.ts`: nessuno scheduler singolo è affidabile su questo stack, la soluzione è la ridondanza.
+
+**Fix**: `.github/workflows/eod-close.yml` chiama l'endpoint ripetutamente (ogni 5 minuti) in una finestra 19:35-21:15 UTC — copre sia la chiusura NYSE in EDT (20:00 UTC) sia in EST (21:00 UTC), risolvendo anche il vecchio limite noto sull'ora legale come effetto collaterale: le chiamate fuori dalla vera finestra pre-chiusura sono no-op innocui, la funzione controlla sempre da sola l'orologio di mercato reale (`CLOSE_WINDOW_MINUTES = 20`) prima di agire. Il Vercel Cron nativo resta comunque registrato in `vercel.json`, ridondante ma innocuo. Richiede `CRON_SECRET` come secret del repo GitHub (stesso valore già su Vercel, aggiunto a mano da Nicola — non leggibile via CLI, Vercel lo marca "Secret").
 
 ## Regole di dominio da non violare
 

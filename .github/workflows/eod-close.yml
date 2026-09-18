@@ -1,0 +1,43 @@
+name: EOD close (real account)
+
+# Scheduler esterno per api/cron/eod-close.ts: il Vercel Cron nativo (vercel.json, un solo
+# orario UTC fisso al giorno sul piano Hobby) risultava registrato correttamente
+# (`vercel crons ls` lo conferma) ma non veniva mai invocato da Vercel — scoperto il
+# 18/9/2026: la tabella `sessions` è rimasta vuota dal go-live e nessuna posizione reale
+# profittevole si è mai chiusa automaticamente a fine seduta. Stessa lezione già imparata
+# con tick.ts (vedi tick.yml): nessuno scheduler singolo è affidabile su questo stack, la
+# soluzione è la ridondanza — più chiamate in una finestra, non un singolo orario preciso.
+#
+# La finestra copre sia la chiusura NYSE in EDT (20:00 UTC) sia in EST (21:00 UTC) — risolve
+# anche il limite noto sull'ora legale (vedi CLAUDE.md), dato che le chiamate fuori dalla
+# vera finestra pre-chiusura sono no-op innocui: la funzione controlla sempre da sola
+# l'orologio di mercato reale prima di agire. Il Vercel Cron nativo resta comunque attivo in
+# vercel.json, ridondante ma innocuo se dovesse ricominciare a funzionare da solo.
+on:
+  schedule:
+    - cron: "35-59/5 19 * * 1-5"
+    - cron: "*/5 20 * * 1-5"
+    - cron: "0-15/5 21 * * 1-5"
+  workflow_dispatch: {}
+
+# Stesso motivo di tick.yml: invocazioni che si sovrappongono potrebbero entrambe vedere le
+# stesse posizioni aperte e tentare di chiuderle in parallelo — non pericoloso (Alpaca
+# rifiuta la seconda DELETE su una posizione già chiusa), ma inutile rumore nei log.
+concurrency:
+  group: eod-close
+  cancel-in-progress: false
+
+jobs:
+  eod-close:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call eod-close endpoint
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            https://whad-trading.vercel.app/api/cron/eod-close)
+          echo "HTTP $status"
+          cat response.json
+          if [ "$status" -ge 300 ]; then
+            exit 1
+          fi
