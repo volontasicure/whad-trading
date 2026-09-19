@@ -43,6 +43,9 @@ import {
   type TrendContext as VwapTrendContext,
 } from "./vwapReversion.js";
 
+/** Perdita giornaliera (% dell'equity di ieri) oltre la quale il reale smette di aprire nuove posizioni. Aggiunto il 19/9/2026: il 15/9 e il 16/9 avrebbero perso circa 1.000 invece di 1.378 e 2.057. */
+export const MAX_DAILY_LOSS_PCT = 1.0;
+
 export interface RealPositionRow {
   id: number;
   strategy_id: string;
@@ -86,6 +89,8 @@ export interface RealExecutionSummary {
 
 export interface RealExecutionResult {
   skipped: false;
+  /** Vero se i nuovi ingressi sono stati bloccati dal limite di perdita giornaliero. */
+  haltedByDailyLoss?: boolean;
   chosenStrategyId: string;
   exits: number;
   entries: number;
@@ -113,6 +118,8 @@ interface AlpacaAccount {
    *  l'equity su un conto Reg T — usarlo sizerebbe il conto reale a leva senza che nessuno
    *  l'abbia deciso, scoperto in dry-run prima del deploy: $100k equity, $400k buying_power). */
   equity: string;
+  /** Equity alla chiusura precedente: base per la perdita giornaliera. */
+  last_equity: string;
 }
 
 /** Alpaca rifiuta stop/limit price con più di 2 decimali sui titoli sopra 1$. */
@@ -430,11 +437,18 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
 
   // --- Ingressi: solo per la strategia scelta oggi, solo se non siamo a ridosso della chiusura ---
   let entryCount = 0;
+  let haltedByDailyLoss = false;
   if (!ctx.nearClose) {
     const account = await alpacaFetch<AlpacaAccount>("/v2/account");
     const capital = Number(account.equity);
+    // Limite di perdita giornaliero: oltre -MAX_DAILY_LOSS_PCT dell'equity di ieri (realized +
+    // unrealized) niente nuovi ingressi; le uscite restano gestite come sempre.
+    const lastEquity = Number(account.last_equity);
+    if (lastEquity > 0 && (capital - lastEquity) / lastEquity <= -MAX_DAILY_LOSS_PCT / 100) haltedByDailyLoss = true;
 
-    if (chosenStrategyId === VWAP_STRATEGY_ID) {
+    if (haltedByDailyLoss) {
+      // nessun nuovo ingresso: limite di perdita giornaliero raggiunto
+    } else if (chosenStrategyId === VWAP_STRATEGY_ID) {
       const stillOpen = new Set(vwapOpen.filter((p) => !vwapExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
       const freeSlots = VWAP_MAX_POSITIONS - stillOpen.size;
       // ctx.vwapTrend disponibile ma NON passato qui apposta — stesso interruttore spento di
@@ -535,5 +549,5 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     }
   }
 
-  return { skipped: false, chosenStrategyId, exits: exitCount, entries: entryCount };
+  return { skipped: false, chosenStrategyId, exits: exitCount, entries: entryCount, haltedByDailyLoss };
 }

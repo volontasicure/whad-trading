@@ -548,7 +548,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
       realNote = realResult.skipped
         ? `reale: saltata (${realResult.reason})`
-        : `reale: ${realResult.chosenStrategyId}, ${realResult.exits} chiuse/${realResult.entries} aperte`;
+        : `reale: ${realResult.chosenStrategyId}, ${realResult.exits} chiuse/${realResult.entries} aperte${realResult.haltedByDailyLoss ? " (STOP GIORNALIERO: niente nuovi ingressi)" : ""}`;
     } catch (err) {
       realNote = `reale: errore (${(err as Error).message})`;
     }

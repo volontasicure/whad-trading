@@ -10,7 +10,8 @@
 /** Moltiplicatori min/max rispetto alla baseline equal-weight (capital/maxPositions): un segnale
  *  estremo non deve prosciugare il budget, uno marginale non deve ricevere una size simbolica. */
 export const FLOOR_MULT = 0.5;
-export const CAP_MULT = 2.0;
+/** Portato da 2,0 a 1,0 il 19/9/2026: con pochi candidati il peso per convinzione satura sempre il tetto, quindi il reale operava a 2x la size del lab su ogni trade (rapporto 1,92-2,00 su tutte le 20 posizioni ORB del 16-18/9) — di fatto una leva doppia, senza un vantaggio misurato che la giustificasse. */
+export const CAP_MULT = 1.0;
 
 export interface SizingCandidate {
   symbol: string;
