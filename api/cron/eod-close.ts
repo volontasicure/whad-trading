@@ -16,6 +16,11 @@ interface AlpacaPosition {
   current_price: string;
 }
 
+interface RealOpenRow {
+  symbol: string;
+  pair_key: string | null;
+}
+
 interface AlpacaOrder {
   id: string;
   filled_avg_price: string | null;
@@ -72,6 +77,53 @@ async function closeAndRecord(p: AlpacaPosition): Promise<void> {
 }
 
 /**
+ * Determina quali posizioni Alpaca chiudere a fine giornata: le singole (ORB/VWAP — nessun
+ * pair_key in real_positions) sempre, in utile o in perdita, dal 22/9/2026 — stessa regola e
+ * stessa evidenza da backtest di decideLabEodCloses (server/labEod.ts, dettagli lì). Le
+ * gambe di una coppia (pair_key valorizzato) restano sulla regola precedente: chiudono
+ * insieme solo se il P&L combinato è positivo, mai una gamba sola, stesso principio di
+ * decidePairsEodCloses (server/pairsTrading.ts) — riprodotto qui sui dati Alpaca perché il
+ * pairs trading reale non ha ancora avuto un giro di produzione per validarlo oltre il
+ * backtest. Una posizione Alpaca senza riga corrispondente in real_positions (non dovrebbe
+ * succedere) resta sulla vecchia regola prudente "chiudi solo se in utile".
+ */
+function decideRealEodCloses(positions: AlpacaPosition[], openRows: RealOpenRow[]): AlpacaPosition[] {
+  const rowBySymbol = new Map(openRows.map((r) => [r.symbol, r]));
+  const pairGroups = new Map<string, RealOpenRow[]>();
+  for (const r of openRows) {
+    if (!r.pair_key) continue;
+    if (!pairGroups.has(r.pair_key)) pairGroups.set(r.pair_key, []);
+    pairGroups.get(r.pair_key)!.push(r);
+  }
+
+  const symbolsToClose = new Set<string>();
+  for (const p of positions) {
+    const row = rowBySymbol.get(p.symbol);
+    if (!row) {
+      if (Number(p.unrealized_pl) > 0) symbolsToClose.add(p.symbol);
+      continue;
+    }
+    if (!row.pair_key) symbolsToClose.add(p.symbol);
+  }
+  for (const legs of pairGroups.values()) {
+    if (legs.length < 2) continue; // gamba già orfana per altra causa, non compito di questo cron
+    let combined = 0;
+    let allPriced = true;
+    for (const leg of legs) {
+      const pos = positions.find((p) => p.symbol === leg.symbol);
+      if (!pos) {
+        allPriced = false;
+        break;
+      }
+      combined += Number(pos.unrealized_pl);
+    }
+    if (allPriced && combined > 0) for (const leg of legs) symbolsToClose.add(leg.symbol);
+  }
+
+  return positions.filter((p) => symbolsToClose.has(p.symbol));
+}
+
+/**
  * Scrive la riga sessions di oggi (storico reale del debriefing) — una volta sola, qui,
  * perché questo cron gira una volta al giorno vicino alla chiusura ed è il momento in cui
  * "il risultato reale di oggi" è finalmente conosciuto. strategy_id è la proposta del
@@ -119,8 +171,9 @@ async function finalizeTodaySession(): Promise<{ skipped: true; reason: string }
 }
 
 /**
- * Chiude ogni posizione reale con unrealized positivo, a ridosso della chiusura di mercato,
- * e finalizza la riga sessions del debriefing reale (finalizeTodaySession) — stesso cron
+ * Chiude le posizioni reali a ridosso della chiusura di mercato secondo decideRealEodCloses
+ * (singole sempre, pairs solo se in utile combinato — dettagli lì), e finalizza la riga
+ * sessions del debriefing reale (finalizeTodaySession) — stesso cron
  * perché entrambe le cose hanno senso solo "a ridosso della chiusura", per non aggiungere
  * una funzione serverless in più (limite di 12 sul piano Hobby, già al tetto). Invocata da
  * Vercel Cron (vercel.json) una volta al giorno nei feriali.
@@ -159,7 +212,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const positions = await alpacaFetch<AlpacaPosition[]>("/v2/positions");
-    const toClose = positions.filter((p) => Number(p.unrealized_pl) > 0);
+    const openRows = (await db()`
+      SELECT symbol, pair_key FROM real_positions WHERE status = 'open'
+    `) as unknown as RealOpenRow[];
+    const toClose = decideRealEodCloses(positions, openRows);
 
     const results = await Promise.allSettled(toClose.map((p) => closeAndRecord(p)));
     const closed = results.filter((r) => r.status === "fulfilled").length;

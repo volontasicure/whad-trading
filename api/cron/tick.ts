@@ -481,11 +481,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       entriesSummary.pairs = pairsEntries.length;
     }
 
-    // --- Rete di sicurezza EOD: chiude qualunque posizione lab ancora aperta e in utile, a ridosso della chiusura ---
-    // Le coppie sono gestite separatamente (decidePairsEodCloses): le due gambe si chiudono
-    // insieme solo se il P&L combinato è positivo, mai una gamba sola — altrimenti quella
-    // rimasta resta orfana e nessuna logica la riprende più in mano (bug trovato con un
-    // backtest su dati storici reali prima del primo giorno live).
+    // --- Rete di sicurezza EOD, a ridosso della chiusura ---
+    // ORB/VWAP (posizioni singole, decideLabEodCloses): chiude sempre, in utile o in perdita
+    // (dal 22/9/2026, vedi server/labEod.ts per l'evidenza da backtest). Pairs
+    // (decidePairsEodCloses): resta la regola precedente, le due gambe si chiudono insieme
+    // solo se il P&L combinato è positivo, mai una gamba sola — altrimenti quella rimasta
+    // resta orfana e nessuna logica la riprende più in mano (bug trovato con un backtest su
+    // dati storici reali prima del primo giorno live).
     let eodClosedCount = 0;
     if (nearClose) {
       const stillOpenIds = new Set([...vwapExits, ...orbExits].map((e) => e.position.id));
