@@ -93,6 +93,20 @@ const EXP_ORB_STOP_MULT = process.env.EXP_ORB_STOP_MULT ? Number(process.env.EXP
 const EXP_PAIRS_DELAY_MIN = process.env.EXP_PAIRS_DELAY_MIN ? Number(process.env.EXP_PAIRS_DELAY_MIN) : 0;
 if (EXP_ORB_STOP_MULT != null) console.log(`EXP_ORB_STOP_MULT=${EXP_ORB_STOP_MULT}`);
 if (EXP_PAIRS_DELAY_MIN > 0) console.log(`EXP_PAIRS_DELAY_MIN=${EXP_PAIRS_DELAY_MIN}`);
+
+// Varianti VWAP da valutare dopo la seduta del 21/9/2026 (META shortata 6 volte, 5 uscite in perdita,
+// stesso schema di BA il 16/9). Nessuna è attiva in produzione:
+// EXP_VWAP_TREND=0|1 forza il filtro di trend spento/acceso. Se non impostata resta il comportamento storico
+//   dello script (acceso), mentre la produzione lo ha SPENTO: per confrontare con la produzione usare 0.
+// EXP_VWAP_COOLDOWN_STOP=1 dopo uno stop_loss su un simbolo, niente altri ingressi VWAP su quel simbolo nello stesso giorno;
+// EXP_VWAP_MAX_ENTRIES_PER_SYMBOL=N al massimo N ingressi VWAP per simbolo al giorno.
+const EXP_VWAP_TREND = process.env.EXP_VWAP_TREND === undefined ? null : process.env.EXP_VWAP_TREND === '1';
+const EXP_VWAP_COOLDOWN_STOP = process.env.EXP_VWAP_COOLDOWN_STOP === '1';
+const EXP_VWAP_MAX_ENTRIES = process.env.EXP_VWAP_MAX_ENTRIES_PER_SYMBOL ? Number(process.env.EXP_VWAP_MAX_ENTRIES_PER_SYMBOL) : 0;
+console.log(
+  `VWAP: filtro trend=${EXP_VWAP_TREND === null ? "acceso (default storico)" : EXP_VWAP_TREND ? "acceso" : "spento"}, ` +
+    `cooldown post-stop=${EXP_VWAP_COOLDOWN_STOP ? "si" : "no"}, max ingressi/simbolo=${EXP_VWAP_MAX_ENTRIES || "illimitati"}`
+);
 const dailyNet: Record<"orb" | "vwap" | "pairs", number[]> = { orb: [], vwap: [], pairs: [] };
 
 interface AlpacaIntradayBarRaw {
@@ -277,6 +291,8 @@ async function run() {
     }
 
     let openingRanges: Record<string, OpeningRange> = {};
+    const vwapStoppedToday = new Set<string>();
+    const vwapEntriesToday: Record<string, number> = {};
     let dayCounters = { orbEntries: 0, orbExits: 0, vwapEntries: 0, vwapExits: 0, pairsEntries: 0, pairsExits: 0, vwapPnl: 0 };
     const closeMs = new Date(session.closeUtc).getTime();
     const stoppedPairsToday = new Set<string>(); // raffreddamento post-stop, azzerato a ogni giorno
@@ -343,6 +359,7 @@ async function run() {
         dayCounters.vwapExits++;
         dayCounters.vwapPnl += ex.realizedPnl;
         totals.vwap.exitReasons[ex.reason] = (totals.vwap.exitReasons[ex.reason] ?? 0) + 1;
+        if (ex.reason === "stop_loss") vwapStoppedToday.add(ex.position.symbol);
         vwapOpen = vwapOpen.filter((p) => p.id !== ex.position.id);
         strategyOf.delete(ex.position.id);
       }
@@ -370,8 +387,16 @@ async function run() {
       if (!nearClose) {
         const vwapStillOpenSymbols = new Set(vwapOpen.map((p) => p.symbol));
         let vwapEntries: ReturnType<typeof decideVwapEntries> = [];
+        // I simboli bloccati dalle varianti si passano come "già aperti" (decideEntries li salta);
+        // gli slot liberi restano calcolati sulle sole posizioni davvero aperte.
+        const vwapBlocked = new Set(vwapStillOpenSymbols);
+        for (const s of UNIVERSE_SYMBOLS) {
+          if (EXP_VWAP_COOLDOWN_STOP && vwapStoppedToday.has(s)) vwapBlocked.add(s);
+          if (EXP_VWAP_MAX_ENTRIES > 0 && (vwapEntriesToday[s] ?? 0) >= EXP_VWAP_MAX_ENTRIES) vwapBlocked.add(s);
+        }
+        const vwapTrendUsed = EXP_VWAP_TREND === false ? {} : vwapTrend;
         try {
-          vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpenSymbols, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpenSymbols.size, vwapTrend);
+          vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapBlocked, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpenSymbols.size, vwapTrendUsed);
         } catch (e) {
           flag(`[${day} ${timeIso}] eccezione in decideVwapEntries: ${(e as Error).message}`);
         }
@@ -379,6 +404,7 @@ async function run() {
           const id = nextId++;
           vwapOpen.push({ id, symbol: e.symbol, side: e.side, qty: e.qty, entryPrice: e.entryPrice, entryTime: timeIso });
           strategyOf.set(id, "vwap");
+          vwapEntriesToday[e.symbol] = (vwapEntriesToday[e.symbol] ?? 0) + 1;
           totals.vwap.entries++;
           dayCounters.vwapEntries++;
         }

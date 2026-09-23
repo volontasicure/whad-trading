@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { db } from "../server/db.js";
-import { computeRanking } from "../server/debrief.js";
+import { computeRanking, PROPOSED_STRATEGY_ID } from "../server/debrief.js";
 
 interface SessionRow {
   trading_date: string;
@@ -50,7 +50,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const tradingDate = new Date().toISOString().slice(0, 10);
     const { entries, sessionsUsed } = await computeRanking(tradingDate);
-    const proposedStrategyId = sessionsUsed > 0 ? entries[0].strategyId : null;
+    // Dal 23/9/2026 la proposta non è più il primo della classifica — vedi PROPOSED_STRATEGY_ID
+    // in server/debrief.ts. entries/sessionsUsed restano solo per la tabella di classifica.
+    const proposedStrategyId = sessionsUsed > 0 ? PROPOSED_STRATEGY_ID : null;
 
     const confirmRows = (await db()`
       SELECT confirmed_at FROM debrief_confirmations WHERE trading_date = ${tradingDate}

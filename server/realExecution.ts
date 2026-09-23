@@ -13,7 +13,7 @@
 
 import { alpacaFetch, requireCredentials } from "./alpaca.js";
 import { db } from "./db.js";
-import { computeRanking } from "./debrief.js";
+import { computeRanking, PROPOSED_STRATEGY_ID } from "./debrief.js";
 import { sizeByConviction, type SizingCandidate } from "./realSizing.js";
 import { UNIVERSE_SYMBOLS } from "./universe.js";
 import {
@@ -357,9 +357,9 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     return { skipped: true, reason: `ambiente Alpaca '${creds.environment}', non 'paper': esecuzione reale bloccata per sicurezza` };
   }
 
-  const { entries: ranking, sessionsUsed } = await computeRanking(ctx.tradingDate);
+  const { sessionsUsed } = await computeRanking(ctx.tradingDate);
   if (sessionsUsed === 0) return { skipped: true, reason: "nessuno storico di sedute precedenti ancora" };
-  const chosenStrategyId = ranking[0].strategyId;
+  const chosenStrategyId = PROPOSED_STRATEGY_ID;
 
   const vwapOpen: VwapOpenPosition[] = ctx.openRows
     .filter((r) => r.strategy_id === VWAP_STRATEGY_ID)

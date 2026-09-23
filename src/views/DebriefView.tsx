@@ -42,11 +42,15 @@ export function DebriefView() {
       };
     });
     const top = realDebrief.ranking[0];
+    // La proposta non è più necessariamente il primo della classifica (vedi PROPOSED_STRATEGY_ID
+    // in server/debrief.ts) — il netto mostrato deve essere quello della strategia proposta,
+    // non quello del primo in classifica, altrimenti motivazione e numero non coincidono.
+    const proposedEntry = realDebrief.ranking.find((e) => e.strategyId === realDebrief.proposedStrategyId) ?? top;
     const proposed = STRATEGIES.find((s) => s.id === realDebrief.proposedStrategyId);
-    proposedName = proposed?.name ?? top.strategyId;
+    proposedName = proposed?.name ?? proposedEntry.strategyId;
     proposedNote = proposed?.note ?? "";
-    proposedId = proposed?.id ?? top.strategyId;
-    proposalLine = `${proposedNote} Netto reale sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"}: ${money(top.net)} $.`;
+    proposedId = proposed?.id ?? proposedEntry.strategyId;
+    proposalLine = `${proposedNote} Netto reale sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"}: ${money(proposedEntry.net)} $.`;
     basisLine = `Punteggio sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"} reali: P&L netto realizzato (lab_positions). Sharpe/win rate non ancora calcolati sul reale.`;
   } else {
     const best = STRATEGIES[BEST_STRATEGY_INDEX];
@@ -92,32 +96,37 @@ export function DebriefView() {
             </div>
             <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>{basisLine}</div>
           </div>
-          {ranking.map((entry, k) => (
-            <div key={entry.strategyId} style={{ padding: "16px 18px", borderBottom: "1px solid var(--border-subtle)", display: "flex", flexDirection: "column", gap: 11 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                <div className="mono" style={{ fontSize: 12, color: "var(--text-faint)" }}>{"0" + (k + 1)}</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: "1 1 180px" }}>
-                  <div style={{ fontSize: 14, fontWeight: 500 }}>{entry.name}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>{entry.note}</div>
+          {ranking.map((entry, k) => {
+            // La proposta non è più per forza il primo della classifica (vedi PROPOSED_STRATEGY_ID
+            // in server/debrief.ts) — il badge deve seguire la strategia proposta, non la posizione.
+            const isProposed = entry.strategyId === proposedId;
+            return (
+              <div key={entry.strategyId} style={{ padding: "16px 18px", borderBottom: "1px solid var(--border-subtle)", display: "flex", flexDirection: "column", gap: 11 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div className="mono" style={{ fontSize: 12, color: "var(--text-faint)" }}>{"0" + (k + 1)}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: "1 1 180px" }}>
+                    <div style={{ fontSize: 14, fontWeight: 500 }}>{entry.name}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>{entry.note}</div>
+                  </div>
+                  <div
+                    className="badge"
+                    style={{
+                      background: isProposed ? "var(--green-tint)" : "var(--fill-neutral)",
+                      color: isProposed ? "var(--green-ink)" : "var(--text-faint)",
+                    }}
+                  >
+                    {isProposed ? "PROPOSTA" : "IN ATTESA"}
+                  </div>
+                  <div className="mono" style={{ fontSize: 18, fontWeight: 500, textAlign: "right" }}>
+                    {entry.scoreLabel}
+                  </div>
                 </div>
-                <div
-                  className="badge"
-                  style={{
-                    background: k === 0 ? "var(--green-tint)" : "var(--fill-neutral)",
-                    color: k === 0 ? "var(--green-ink)" : "var(--text-faint)",
-                  }}
-                >
-                  {k === 0 ? "PROPOSTA" : "IN ATTESA"}
-                </div>
-                <div className="mono" style={{ fontSize: 18, fontWeight: 500, textAlign: "right" }}>
-                  {entry.scoreLabel}
+                <div style={{ height: 6, borderRadius: 4, background: "#f0f0ec", overflow: "hidden" }}>
+                  <div style={{ height: 6, borderRadius: 4, width: `${entry.barPct}%`, background: isProposed ? "var(--accent)" : "#dcdbd5" }} />
                 </div>
               </div>
-              <div style={{ height: 6, borderRadius: 4, background: "#f0f0ec", overflow: "hidden" }}>
-                <div style={{ height: 6, borderRadius: 4, width: `${entry.barPct}%`, background: k === 0 ? "var(--accent)" : "#dcdbd5" }} />
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>

@@ -3,7 +3,7 @@ import { alpacaFetch } from "../../server/alpaca.js";
 import { db } from "../../server/db.js";
 import { fetchMarketSession } from "../../server/marketHours.js";
 import { CAPITAL } from "../../server/pairsTrading.js";
-import { computeRanking, todayResultFor, STRATEGY_IDS } from "../../server/debrief.js";
+import { computeRanking, todayResultFor, STRATEGY_IDS, PROPOSED_STRATEGY_ID } from "../../server/debrief.js";
 
 interface AlpacaClock {
   is_open: boolean;
@@ -136,10 +136,12 @@ function decideRealEodCloses(positions: AlpacaPosition[], openRows: RealOpenRow[
  */
 async function finalizeTodaySession(): Promise<{ skipped: true; reason: string } | { skipped: false; strategyId: string; net: number }> {
   const tradingDate = new Date().toISOString().slice(0, 10);
-  const { entries, sessionsUsed } = await computeRanking(tradingDate);
+  const { sessionsUsed } = await computeRanking(tradingDate);
   if (sessionsUsed === 0) return { skipped: true, reason: "nessuno storico di sedute precedenti ancora" };
 
-  const proposedStrategyId = entries[0].strategyId;
+  // Dal 23/9/2026 la proposta non è più il primo della classifica — vedi PROPOSED_STRATEGY_ID
+  // in server/debrief.ts.
+  const proposedStrategyId = PROPOSED_STRATEGY_ID;
   const session = await fetchMarketSession(tradingDate);
   if (!session) return { skipped: true, reason: "nessuna sessione di mercato per oggi nel calendario" };
 
