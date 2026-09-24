@@ -11,7 +11,14 @@ export const RSI_PERIOD = 14;
 export const RSI_OVERBOUGHT = 70;
 export const RSI_OVERSOLD = 30;
 export const STOP_LOSS_PCT = 0.6;
-export const MAX_HOLD_MINUTES = 45;
+// 90 minuti dal 24/9/2026 (era 45) — backtest A/B su due finestre indipendenti: sullo storico
+// completo il bucket max_hold era l'unico lievemente positivo (+692 netto su 43 trade),
+// segno che il segnale d'ingresso ha un margine ma veniva tagliato prima di potersi
+// esprimere. A 90 minuti i target raggiunti nella finestra recente passano da ~5 a 17 (molte
+// posizioni arrivano al rientro sul VWAP invece di uscire a tempo scaduto) — P&L da 2.231/999
+// a 2.248/1.463, migliora su entrambe le finestre (marcato fuori campione, +46%). 60 minuti è
+// misto (non adottato). Vedi CLAUDE.md.
+export const MAX_HOLD_MINUTES = 90;
 /**
  * Filtro di trend di fondo (media mobile + Efficiency Ratio di Kaufman, server/
  * technicalIndicators.ts): non scommettere sul ritorno al VWAP contro un titolo che è già in
@@ -98,7 +105,11 @@ function unrealizedPct(side: Side, entryPrice: number, price: number): number {
 export function decideExits(
   openPositions: OpenPosition[],
   snapshots: Record<string, Snapshot>,
-  now: Date
+  now: Date,
+  /** Solo per backtest sperimentali (scripts/backtest.ts, EXP_VWAP_STOP_PCT) — default STOP_LOSS_PCT, mai passato dai chiamanti reali. */
+  stopLossPctOverride: number = STOP_LOSS_PCT,
+  /** Solo per backtest sperimentali (scripts/backtest.ts, EXP_VWAP_MAX_HOLD_MIN) — default MAX_HOLD_MINUTES, mai passato dai chiamanti reali. */
+  maxHoldMinutesOverride: number = MAX_HOLD_MINUTES
 ): ExitDecision[] {
   const decisions: ExitDecision[] = [];
   for (const pos of openPositions) {
@@ -109,8 +120,8 @@ export function decideExits(
     const pct = unrealizedPct(pos.side, pos.entryPrice, snap.price);
 
     const targetReached = pos.side === "LONG" ? snap.price >= snap.vwap : snap.price <= snap.vwap;
-    const stopHit = pct <= -STOP_LOSS_PCT;
-    const timeUp = holdMinutes >= MAX_HOLD_MINUTES;
+    const stopHit = pct <= -stopLossPctOverride;
+    const timeUp = holdMinutes >= maxHoldMinutesOverride;
 
     if (!targetReached && !stopHit && !timeUp) continue;
 
@@ -141,7 +152,9 @@ export function decideEntries(
   snapshots: Record<string, Snapshot>,
   barsBySymbol: Record<string, Bar[]>,
   freeSlots: number,
-  trendBySymbol: Record<string, TrendContext> = {}
+  trendBySymbol: Record<string, TrendContext> = {},
+  /** Solo per backtest sperimentali (scripts/backtest.ts, EXP_VWAP_EXTENSION_PCT) — default EXTENSION_THRESHOLD_PCT, mai passato dai chiamanti reali. */
+  extensionThresholdPctOverride: number = EXTENSION_THRESHOLD_PCT
 ): EntryDecision[] {
   if (freeSlots <= 0) return [];
 
@@ -157,7 +170,7 @@ export function decideEntries(
     if (rsi == null) continue;
 
     const distancePct = ((snap.price - snap.vwap) / snap.vwap) * 100;
-    if (Math.abs(distancePct) < EXTENSION_THRESHOLD_PCT) continue;
+    if (Math.abs(distancePct) < extensionThresholdPctOverride) continue;
 
     const exhausted = distancePct > 0 ? rsi > RSI_OVERBOUGHT : rsi < RSI_OVERSOLD;
     if (!exhausted) continue;

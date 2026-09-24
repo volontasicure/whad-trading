@@ -122,7 +122,7 @@ export const STRATEGIES: Strategy[] = [
     params: [
       { label: "Range di apertura", value: "15 min", hint: "finestra che definisce i livelli di rottura" },
       { label: "Filtro volatilità", value: "ATR > 2%", hint: "solo i titoli più mobili dell'universo" },
-      { label: "Conferma volume", value: "1,8× medio", hint: "volume minimo sulla candela di rottura" },
+      { label: "Conferma volume", value: "2,5× medio", hint: "volume minimo sulla candela di rottura" },
       { label: "Stop loss", value: "0,5× range", hint: "metà dell'ampiezza del range di apertura" },
       { label: "Take profit", value: "2,0× range", hint: "target simmetrico al rischio assunto" },
       { label: "Titoli max in portafoglio", value: `6 / ${MARKET.length}`, hint: "solo le rotture più ampie" },
@@ -178,7 +178,7 @@ export const STRATEGIES: Strategy[] = [
       { label: "Filtro esaurimento", value: "RSI 14 > 70 / < 30", hint: "conferma di momentum in rallentamento" },
       { label: "Target", value: "VWAP", hint: "chiusura al ritorno sulla media di giornata" },
       { label: "Stop loss", value: "−0,6%", hint: "oltre l'estremo della candela di ingresso" },
-      { label: "Tempo massimo in posizione", value: "45 min", hint: "uscita a mercato se il rientro non arriva" },
+      { label: "Tempo massimo in posizione", value: "90 min", hint: "uscita a mercato se il rientro non arriva" },
       { label: "Titoli max in portafoglio", value: `8 / ${MARKET.length}`, hint: "le estensioni più ampie dell'universo" },
     ],
     backtest: {

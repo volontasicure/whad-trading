@@ -7,7 +7,12 @@ export const MAX_POSITIONS = 6;
 export const CAPITAL = 100_000;
 export const OPENING_RANGE_MINUTES = 15;
 export const ATR_THRESHOLD_PCT = 2;
-export const VOLUME_MULTIPLE = 1.8;
+// 2,5× dal 24/9/2026 (era 1,8×) — backtest A/B su due finestre indipendenti dopo la seduta
+// whipsaw del 24/9 (13 ingressi, 12 stop, 1 target, -1.154 nel lab): una soglia più severa
+// riduce gli ingressi (~440 -> 351/354) e migliora il P&L su entrambe le finestre
+// (-1.472/-915 -> -870/-759) — ancora negativo, ma meno. 1,4× (più permissivo) è andato molto
+// peggio (-7.597/-4.317), a conferma della direzione. Vedi CLAUDE.md.
+export const VOLUME_MULTIPLE = 2.5;
 export const STOP_LOSS_RANGE_MULT = 0.5;
 export const TAKE_PROFIT_RANGE_MULT = 2.0;
 
@@ -73,8 +78,12 @@ export function computeATRPct(dailyBarsAscending: DailyBar[], period = 14): numb
 }
 
 /** Range di apertura (alto/basso) dalle prime OPENING_RANGE_MINUTES di barre a 5 min della seduta. */
-export function computeOpeningRange(sessionBarsAscending: { h: number; l: number }[]): OpeningRange | null {
-  const barsNeeded = Math.ceil(OPENING_RANGE_MINUTES / 5);
+export function computeOpeningRange(
+  sessionBarsAscending: { h: number; l: number }[],
+  /** Solo per backtest sperimentali (scripts/backtest.ts, EXP_ORB_RANGE_MINUTES) — default OPENING_RANGE_MINUTES, mai passato dai chiamanti reali. */
+  openingRangeMinutesOverride: number = OPENING_RANGE_MINUTES
+): OpeningRange | null {
+  const barsNeeded = Math.ceil(openingRangeMinutesOverride / 5);
   if (sessionBarsAscending.length < barsNeeded) return null;
   const window = sessionBarsAscending.slice(0, barsNeeded);
   return {
@@ -118,7 +127,9 @@ export function decideEntries(
   universeSymbols: string[],
   openSymbols: Set<string>,
   inputsBySymbol: Record<string, EntryInputs>,
-  freeSlots: number
+  freeSlots: number,
+  /** Solo per backtest sperimentali (scripts/backtest.ts, EXP_ORB_VOLUME_MULT) — default VOLUME_MULTIPLE, mai passato dai chiamanti reali. */
+  volumeMultipleOverride: number = VOLUME_MULTIPLE
 ): EntryDecision[] {
   if (freeSlots <= 0) return [];
 
@@ -137,7 +148,7 @@ export function decideEntries(
     if (!brokeUp && !brokeDown) continue;
 
     if (atrPct < ATR_THRESHOLD_PCT) continue;
-    if (avgBarVolume <= 0 || latestBarVolume < avgBarVolume * VOLUME_MULTIPLE) continue;
+    if (avgBarVolume <= 0 || latestBarVolume < avgBarVolume * volumeMultipleOverride) continue;
 
     const side: Side = brokeUp ? "LONG" : "SHORT";
     const breakoutStrength = brokeUp

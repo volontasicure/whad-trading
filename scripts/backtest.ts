@@ -29,6 +29,7 @@ import {
 import {
   MAX_POSITIONS as VWAP_MAX_POSITIONS,
   TREND_FILTER_DAYS as VWAP_TREND_FILTER_DAYS,
+  STOP_LOSS_PCT as VWAP_STOP_LOSS_PCT,
   decideEntries as decideVwapEntries,
   decideExits as decideVwapExits,
   type Bar as VwapBar,
@@ -107,6 +108,49 @@ console.log(
   `VWAP: filtro trend=${EXP_VWAP_TREND === null ? "acceso (default storico)" : EXP_VWAP_TREND ? "acceso" : "spento"}, ` +
     `cooldown post-stop=${EXP_VWAP_COOLDOWN_STOP ? "si" : "no"}, max ingressi/simbolo=${EXP_VWAP_MAX_ENTRIES || "illimitati"}`
 );
+
+// Varianti ORB valutate dopo la seduta whipsaw del 24/9/2026 (13 ingressi, 12 stop, 1 target,
+// -1.154 nel lab — record negativo — con TXN e GE, i range più stretti in % del prezzo,
+// rientrati 3-4 volte ciascuno sullo stesso livello). Nessuna è attiva in produzione:
+// EXP_ORB_MIN_RANGE_PCT=0.6 scarta la rottura se il range di apertura è sotto questa % del prezzo
+//   (stop troppo stretto rispetto al rumore normale a 5 minuti);
+// EXP_ORB_CONFIRM_BARS=2 richiede che il prezzo resti oltre il range per N barre consecutive
+//   prima di entrare, invece di 1 sola barra;
+// EXP_ORB_MAX_ENTRIES_PER_SYMBOL=2 limita i tentativi per simbolo per giorno (diverso dal
+//   cooldown totale già bocciato il 18/9 — qui i rientri restano permessi, solo non illimitati).
+const EXP_ORB_MIN_RANGE_PCT = process.env.EXP_ORB_MIN_RANGE_PCT ? Number(process.env.EXP_ORB_MIN_RANGE_PCT) : 0;
+const EXP_ORB_CONFIRM_BARS = process.env.EXP_ORB_CONFIRM_BARS ? Number(process.env.EXP_ORB_CONFIRM_BARS) : 1;
+const EXP_ORB_MAX_ENTRIES = process.env.EXP_ORB_MAX_ENTRIES_PER_SYMBOL ? Number(process.env.EXP_ORB_MAX_ENTRIES_PER_SYMBOL) : 0;
+console.log(
+  `ORB: range minimo=${EXP_ORB_MIN_RANGE_PCT > 0 ? EXP_ORB_MIN_RANGE_PCT + "%" : "nessuno"}, ` +
+    `conferma barre=${EXP_ORB_CONFIRM_BARS}, max ingressi/simbolo=${EXP_ORB_MAX_ENTRIES || "illimitati"}`
+);
+
+// Variante VWAP valutata dopo l'analisi del 24/9/2026 sullo storico completo: il bucket
+// stop_loss (29 trade su tutta la storia, netto -2.674, media -92/trade) è di gran lunga il
+// più grande fattore di perdita del VWAP, mentre max_hold (43 trade, +692) è lievemente
+// positivo — segno che il segnale d'ingresso ha un margine, ma lo stop attuale (0,6%) lo
+// taglia spesso prima che possa esprimersi. Non attiva in produzione.
+const EXP_VWAP_STOP_PCT = process.env.EXP_VWAP_STOP_PCT ? Number(process.env.EXP_VWAP_STOP_PCT) : null;
+if (EXP_VWAP_STOP_PCT != null) console.log(`VWAP: stop override=${EXP_VWAP_STOP_PCT}% (produzione: ${VWAP_STOP_LOSS_PCT}%)`);
+
+// Altri parametri valutati il 24/9/2026, ognuno su un asse diverso da quelli già bocciati
+// stasera (range minimo/conferma barre/tetto ingressi per ORB, stop per VWAP). Nessuno attivo
+// in produzione. EXP_ORB_RANGE_MINUTES: ampiezza del range di apertura (default 15 min) — un
+// range più largo dovrebbe essere meno rumoroso della sola soglia minima già bocciata.
+// EXP_ORB_VOLUME_MULT: soglia di conferma volume (default 1,8×) — asse diverso dall'ampiezza
+// del range. EXP_VWAP_MAX_HOLD_MIN: durata massima in posizione (default 45 min) — il bucket
+// max_hold è l'unico lievemente positivo nello storico (+692 su 43 trade), un tempo più lungo
+// potrebbe lasciarlo esprimere di più. EXP_VWAP_EXTENSION_PCT: soglia minima di distanza dal
+// VWAP per entrare (default 1,2%) — asse diverso dallo stop già testato.
+const EXP_ORB_RANGE_MINUTES = process.env.EXP_ORB_RANGE_MINUTES ? Number(process.env.EXP_ORB_RANGE_MINUTES) : null;
+const EXP_ORB_VOLUME_MULT = process.env.EXP_ORB_VOLUME_MULT ? Number(process.env.EXP_ORB_VOLUME_MULT) : null;
+const EXP_VWAP_MAX_HOLD_MIN = process.env.EXP_VWAP_MAX_HOLD_MIN ? Number(process.env.EXP_VWAP_MAX_HOLD_MIN) : null;
+const EXP_VWAP_EXTENSION_PCT = process.env.EXP_VWAP_EXTENSION_PCT ? Number(process.env.EXP_VWAP_EXTENSION_PCT) : null;
+if (EXP_ORB_RANGE_MINUTES != null) console.log(`ORB: range di apertura override=${EXP_ORB_RANGE_MINUTES} min (produzione: 15)`);
+if (EXP_ORB_VOLUME_MULT != null) console.log(`ORB: soglia volume override=${EXP_ORB_VOLUME_MULT}× (produzione: 1.8×)`);
+if (EXP_VWAP_MAX_HOLD_MIN != null) console.log(`VWAP: max hold override=${EXP_VWAP_MAX_HOLD_MIN} min (produzione: 45)`);
+if (EXP_VWAP_EXTENSION_PCT != null) console.log(`VWAP: soglia estensione override=${EXP_VWAP_EXTENSION_PCT}% (produzione: 1.2%)`);
 const dailyNet: Record<"orb" | "vwap" | "pairs", number[]> = { orb: [], vwap: [], pairs: [] };
 
 interface AlpacaIntradayBarRaw {
@@ -293,6 +337,8 @@ async function run() {
     let openingRanges: Record<string, OpeningRange> = {};
     const vwapStoppedToday = new Set<string>();
     const vwapEntriesToday: Record<string, number> = {};
+    const orbEntriesToday: Record<string, number> = {};
+    const orbBreakoutStreak: Record<string, { side: "LONG" | "SHORT"; count: number }> = {};
     let dayCounters = { orbEntries: 0, orbExits: 0, vwapEntries: 0, vwapExits: 0, pairsEntries: 0, pairsExits: 0, vwapPnl: 0 };
     const closeMs = new Date(session.closeUtc).getTime();
     const stoppedPairsToday = new Set<string>(); // raffreddamento post-stop, azzerato a ogni giorno
@@ -309,7 +355,7 @@ async function run() {
 
       if (Object.keys(openingRanges).length === 0) {
         for (const s of UNIVERSE_SYMBOLS) {
-          const range = computeOpeningRange(barsUpToNow[s].map((b) => ({ h: b.h, l: b.l })));
+          const range = computeOpeningRange(barsUpToNow[s].map((b) => ({ h: b.h, l: b.l })), EXP_ORB_RANGE_MINUTES ?? undefined);
           if (range) openingRanges[s] = range;
         }
       }
@@ -326,7 +372,7 @@ async function run() {
       let orbExits: ReturnType<typeof decideOrbExits> = [];
       let pairsExits: ReturnType<typeof decidePairsExits> = [];
       try {
-        vwapExits = decideVwapExits(vwapOpen, vwapSnapshots, now);
+        vwapExits = decideVwapExits(vwapOpen, vwapSnapshots, now, EXP_VWAP_STOP_PCT ?? undefined, EXP_VWAP_MAX_HOLD_MIN ?? undefined);
       } catch (e) {
         flag(`[${day} ${timeIso}] eccezione in decideVwapExits: ${(e as Error).message}`);
       }
@@ -396,7 +442,7 @@ async function run() {
         }
         const vwapTrendUsed = EXP_VWAP_TREND === false ? {} : vwapTrend;
         try {
-          vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapBlocked, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpenSymbols.size, vwapTrendUsed);
+          vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapBlocked, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpenSymbols.size, vwapTrendUsed, EXP_VWAP_EXTENSION_PCT ?? undefined);
         } catch (e) {
           flag(`[${day} ${timeIso}] eccezione in decideVwapEntries: ${(e as Error).message}`);
         }
@@ -417,12 +463,30 @@ async function run() {
           const bars = barsUpToNow[s];
           const price = prices[s];
           if (!range || atr == null || bars.length === 0 || price == null) continue;
+
+          // Striscia di barre consecutive oltre il range, nella stessa direzione — per
+          // EXP_ORB_CONFIRM_BARS. Aggiornata per ogni simbolo con dati validi, aperto o no.
+          const brokeUp = price > range.high;
+          const brokeDown = price < range.low;
+          if (brokeUp || brokeDown) {
+            const side: "LONG" | "SHORT" = brokeUp ? "LONG" : "SHORT";
+            const prev = orbBreakoutStreak[s];
+            orbBreakoutStreak[s] = prev && prev.side === side ? { side, count: prev.count + 1 } : { side, count: 1 };
+          } else {
+            delete orbBreakoutStreak[s];
+          }
+
+          if (EXP_ORB_MAX_ENTRIES > 0 && (orbEntriesToday[s] ?? 0) >= EXP_ORB_MAX_ENTRIES) continue;
+          const rangePct = ((range.high - range.low) / price) * 100;
+          if (EXP_ORB_MIN_RANGE_PCT > 0 && rangePct < EXP_ORB_MIN_RANGE_PCT) continue;
+          if (EXP_ORB_CONFIRM_BARS > 1 && (orbBreakoutStreak[s]?.count ?? 0) < EXP_ORB_CONFIRM_BARS) continue;
+
           const avgVol = bars.reduce((a, b) => a + b.v, 0) / bars.length;
           orbInputs[s] = { price, openingRange: range, atrPct: atr, avgBarVolume: avgVol, latestBarVolume: bars[bars.length - 1].v };
         }
         let orbEntries: ReturnType<typeof decideOrbEntries> = [];
         try {
-          orbEntries = decideOrbEntries(UNIVERSE_SYMBOLS, orbStillOpenSymbols, orbInputs, ORB_MAX_POSITIONS - orbStillOpenSymbols.size);
+          orbEntries = decideOrbEntries(UNIVERSE_SYMBOLS, orbStillOpenSymbols, orbInputs, ORB_MAX_POSITIONS - orbStillOpenSymbols.size, EXP_ORB_VOLUME_MULT ?? undefined);
         } catch (e) {
           flag(`[${day} ${timeIso}] eccezione in decideOrbEntries: ${(e as Error).message}`);
         }
@@ -436,6 +500,7 @@ async function run() {
           }
           orbOpen.push({ id, symbol: e.symbol, side: e.side, qty: e.qty, entryPrice: e.entryPrice, stopPrice, targetPrice: e.targetPrice });
           strategyOf.set(id, "orb");
+          orbEntriesToday[e.symbol] = (orbEntriesToday[e.symbol] ?? 0) + 1;
           totals.orb.entries++;
           dayCounters.orbEntries++;
         }
