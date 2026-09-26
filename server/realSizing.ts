@@ -3,9 +3,12 @@
 // ogni posizione è proporzionale alla convinzione del segnale che l'ha generata (forza della
 // rottura per ORB, distanza dal VWAP per VWAP, |z-score| per pairs), non uguale per tutti.
 //
-// Il conto reale trada una sola strategia alla volta (quella scelta al debriefing), quindi non
-// serve una scala comparabile tra strategie diverse — solo un ordinamento relativo tra i
-// candidati del giorno per la stessa strategia.
+// Dal 25/9/2026 più strategie possono ricevere capitale reale insieme (server/
+// strategyAllocation.ts): totalCapital qui non è più sempre l'intero conto, ma il budget della
+// singola strategia (equity × il suo peso) — il chiamante (server/realExecution.ts) passa la
+// quota già calcolata, questa funzione resta ignara di quante altre strategie sono allocate
+// oggi. Non serve una scala comparabile tra strategie diverse — solo un ordinamento relativo
+// tra i candidati del giorno per la stessa strategia, nel suo budget.
 
 /** Moltiplicatori min/max rispetto alla baseline equal-weight (capital/maxPositions): un segnale
  *  estremo non deve prosciugare il budget, uno marginale non deve ricevere una size simbolica. */

@@ -15,18 +15,25 @@ interface DisplayRankEntry {
   barPct: number;
 }
 
+interface DisplayAllocationEntry {
+  strategyId: string;
+  name: string;
+  note: string;
+  eligible: boolean;
+  reason: string;
+  /** 0-100. */
+  weightPct: number;
+}
+
 export function DebriefView() {
   const navigate = useNavigate();
   const { confirmed, autoConfirm, confirmChoice, realDebrief, debriefSource } = useAppState();
 
   const isConfirmed = confirmed || autoConfirm;
-  const hasRealRanking = Boolean(realDebrief && realDebrief.sessionsUsed > 0 && realDebrief.proposedStrategyId);
+  const hasRealRanking = Boolean(realDebrief && realDebrief.sessionsUsed > 0);
 
   let ranking: DisplayRankEntry[];
-  let proposedName: string;
-  let proposedNote: string;
-  let proposedId: string;
-  let proposalLine: string;
+  let allocation: DisplayAllocationEntry[];
   let basisLine: string;
 
   if (hasRealRanking && realDebrief) {
@@ -41,19 +48,21 @@ export function DebriefView() {
         barPct: Math.max(0, (e.net / maxAbsNet) * 100),
       };
     });
-    const top = realDebrief.ranking[0];
-    // La proposta non è più necessariamente il primo della classifica (vedi PROPOSED_STRATEGY_ID
-    // in server/debrief.ts) — il netto mostrato deve essere quello della strategia proposta,
-    // non quello del primo in classifica, altrimenti motivazione e numero non coincidono.
-    const proposedEntry = realDebrief.ranking.find((e) => e.strategyId === realDebrief.proposedStrategyId) ?? top;
-    const proposed = STRATEGIES.find((s) => s.id === realDebrief.proposedStrategyId);
-    proposedName = proposed?.name ?? proposedEntry.strategyId;
-    proposedNote = proposed?.note ?? "";
-    proposedId = proposed?.id ?? proposedEntry.strategyId;
-    proposalLine = `${proposedNote} Netto reale sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"}: ${money(proposedEntry.net)} $.`;
-    basisLine = `Punteggio sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"} reali: P&L netto realizzato (lab_positions). Sharpe/win rate non ancora calcolati sul reale.`;
+    // Dal 25/9/2026 (server/strategyAllocation.ts): il capitale reale non va più a un'unica
+    // proposta esclusiva — più strategie possono essere ammesse insieme, ciascuna con un peso.
+    allocation = realDebrief.allocation.map((a) => {
+      const s = STRATEGIES.find((st) => st.id === a.strategyId);
+      return {
+        strategyId: a.strategyId,
+        name: s?.name ?? a.strategyId,
+        note: s?.note ?? "",
+        eligible: a.eligible,
+        reason: a.reason,
+        weightPct: Math.round(a.weight * 100),
+      };
+    });
+    basisLine = `Punteggio sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"} reali: P&L netto realizzato (lab_positions), solo informativo — non decide più l'allocazione. Sharpe/win rate non ancora calcolati sul reale.`;
   } else {
-    const best = STRATEGIES[BEST_STRATEGY_INDEX];
     ranking = BACKTEST_ORDER.map((o, k) => {
       const s = STRATEGIES[o.i];
       const entry = DEBRIEF.ranking[k];
@@ -65,12 +74,23 @@ export function DebriefView() {
         barPct: (entry.score / 20) * 100,
       };
     });
-    proposedName = best.name;
-    proposedNote = best.note;
-    proposedId = best.id;
-    proposalLine = `${best.note} Netto più alto sulle ultime 20 sedute: ${money(BACKTEST_ORDER[0].net)} $ dopo i costi, Sharpe ${dec(best.backtest.sharpe, 2)}.`;
+    // Nessun dato reale di allocazione ancora — fallback illustrativo: il migliore del backtest
+    // finto al 100%, gli altri due esclusi.
+    allocation = STRATEGIES.map((s, i) => ({
+      strategyId: s.id,
+      name: s.name,
+      note: s.note,
+      eligible: i === BEST_STRATEGY_INDEX,
+      reason: i === BEST_STRATEGY_INDEX ? "migliore nel backtest simulato" : "non la migliore nel backtest simulato",
+      weightPct: i === BEST_STRATEGY_INDEX ? 100 : 0,
+    }));
     basisLine = "Punteggio su 20 sedute (dati simulati, nessuno storico reale ancora): P&L netto al netto dei costi, Sharpe, % vincenti e coerenza con il regime di volatilità attesa.";
   }
+
+  const allocatedNames = allocation.filter((a) => a.weightPct > 0).map((a) => a.name);
+  const headline = allocatedNames.length > 0 ? allocatedNames.join(" + ") : "Nessuna strategia ammessa oggi";
+  const weightByStrategy = new Map(allocation.map((a) => [a.strategyId, a.weightPct]));
+  const firstAllocatedId = allocation.find((a) => a.weightPct > 0)?.strategyId ?? allocation[0]?.strategyId;
 
   return (
     <>
@@ -97,9 +117,11 @@ export function DebriefView() {
             <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)" }}>{basisLine}</div>
           </div>
           {ranking.map((entry, k) => {
-            // La proposta non è più per forza il primo della classifica (vedi PROPOSED_STRATEGY_ID
-            // in server/debrief.ts) — il badge deve seguire la strategia proposta, non la posizione.
-            const isProposed = entry.strategyId === proposedId;
+            // Dal 25/9/2026 più strategie possono essere ammesse insieme (server/
+            // strategyAllocation.ts) — il badge segue il peso reale di oggi, non la posizione
+            // in classifica né una singola proposta esclusiva.
+            const weightPct = weightByStrategy.get(entry.strategyId) ?? 0;
+            const isAllocated = weightPct > 0;
             return (
               <div key={entry.strategyId} style={{ padding: "16px 18px", borderBottom: "1px solid var(--border-subtle)", display: "flex", flexDirection: "column", gap: 11 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -111,18 +133,18 @@ export function DebriefView() {
                   <div
                     className="badge"
                     style={{
-                      background: isProposed ? "var(--green-tint)" : "var(--fill-neutral)",
-                      color: isProposed ? "var(--green-ink)" : "var(--text-faint)",
+                      background: isAllocated ? "var(--green-tint)" : "var(--fill-neutral)",
+                      color: isAllocated ? "var(--green-ink)" : "var(--text-faint)",
                     }}
                   >
-                    {isProposed ? "PROPOSTA" : "IN ATTESA"}
+                    {isAllocated ? `AMMESSA ${weightPct}%` : "ESCLUSA"}
                   </div>
                   <div className="mono" style={{ fontSize: 18, fontWeight: 500, textAlign: "right" }}>
                     {entry.scoreLabel}
                   </div>
                 </div>
                 <div style={{ height: 6, borderRadius: 4, background: "#f0f0ec", overflow: "hidden" }}>
-                  <div style={{ height: 6, borderRadius: 4, width: `${entry.barPct}%`, background: isProposed ? "var(--accent)" : "#dcdbd5" }} />
+                  <div style={{ height: 6, borderRadius: 4, width: `${entry.barPct}%`, background: isAllocated ? "var(--accent)" : "#dcdbd5" }} />
                 </div>
               </div>
             );
@@ -132,33 +154,25 @@ export function DebriefView() {
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div className="card" style={{ borderColor: "var(--green-border)", padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
             <div className="mono" style={{ fontSize: 10, letterSpacing: "0.13em", color: "var(--green-ink)" }}>
-              PROPOSTA PER OGGI
+              ALLOCAZIONE REALE DI OGGI
             </div>
-            <div style={{ fontSize: 21, fontWeight: 500, letterSpacing: "-0.015em" }}>{proposedName}</div>
-            <div style={{ fontSize: 12.5, color: "var(--text-secondary-2)", lineHeight: 1.5 }}>{proposalLine}</div>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
-                gap: 12,
-                borderTop: "1px solid var(--border-divider)",
-                paddingTop: 14,
-              }}
-            >
-              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                <div className="mono" style={{ fontSize: 9, letterSpacing: "0.08em", color: "var(--text-faint)" }}>CONFIDENZA</div>
-                <div className="mono" style={{ fontSize: 15 }}>{DEBRIEF.confidence}%</div>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                <div className="mono" style={{ fontSize: 9, letterSpacing: "0.08em", color: "var(--text-faint)" }}>REGIME VIX</div>
-                <div className="mono" style={{ fontSize: 15 }}>
-                  {dec(DEBRIEF.vix.value, 1)} · {DEBRIEF.vix.regime}
+            <div style={{ fontSize: 21, fontWeight: 500, letterSpacing: "-0.015em" }}>{headline}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {allocation.map((a) => (
+                <div key={a.strategyId} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{a.name}</div>
+                    <div className="mono" style={{ fontSize: 13, color: a.weightPct > 0 ? "var(--green-ink)" : "var(--text-faint)" }}>
+                      {a.weightPct > 0 ? `${a.weightPct}%` : "esclusa"}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-secondary-2)" }}>{a.weightPct > 0 ? a.note : a.reason}</div>
                 </div>
-              </div>
+              ))}
             </div>
-            {(!hasRealRanking || true) && (
-              <div style={{ fontSize: 10.5, color: "var(--text-faint)" }}>Confidenza e regime VIX: ancora simulati, non calcolati sul reale.</div>
-            )}
+            <div style={{ fontSize: 10.5, color: "var(--text-faint)", borderTop: "1px solid var(--border-divider)", paddingTop: 10 }}>
+              Capitale reale diviso equamente tra le strategie ammesse (storico minimo in paper + drawdown recente sotto soglia — server/strategyAllocation.ts), non più un'unica proposta.
+            </div>
             <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
               <div
                 className={`btn-primary${isConfirmed ? " confirmed" : ""}`}
@@ -170,8 +184,8 @@ export function DebriefView() {
               >
                 {isConfirmed ? "Attiva sul conto reale ✓" : "Conferma e attiva"}
               </div>
-              <div className="btn-secondary" style={{ flex: "0 1 auto", padding: "11px 14px" }} onClick={() => navigate(`/strategie/${proposedId}`)}>
-                Scegli un'altra
+              <div className="btn-secondary" style={{ flex: "0 1 auto", padding: "11px 14px" }} onClick={() => navigate(firstAllocatedId ? `/strategie/${firstAllocatedId}` : "/lab")}>
+                Vedi il laboratorio
               </div>
             </div>
           </div>

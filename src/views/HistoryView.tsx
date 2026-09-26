@@ -16,7 +16,8 @@ interface DisplayHistoryStat {
 
 interface DisplaySession {
   date: string;
-  strategyId: StrategyId;
+  /** Dal 25/9/2026 può essere composito ("pairs+vwap_reversion") — mai un solo StrategyId garantito, vedi splitStrategyIds/resolveStrategyNames sopra. */
+  strategyId: string;
   net: number;
   deviationPct: number;
   trades: number;
@@ -26,6 +27,20 @@ interface DisplaySession {
 function formatDate(iso: string): string {
   const d = new Date(iso + "T00:00:00Z");
   return d.toLocaleDateString("it-IT", { day: "2-digit", month: "short", timeZone: "UTC" });
+}
+
+/** Dal 25/9/2026 sessions.strategy_id può essere più strategie ammesse insieme, unite da "+"
+ *  (es. "pairs+vwap_reversion") — mai più assunto un singolo id valido, vedi CLAUDE.md. */
+function splitStrategyIds(compositeId: string): string[] {
+  return compositeId.split("+").filter(Boolean);
+}
+
+/** Nomi leggibili di un id composito, per la colonna STRATEGIA — non crasha su id non
+ *  riconosciuti (fallback al segmento grezzo) e non assume mai un solo id. */
+function resolveStrategyNames(compositeId: string): string {
+  return splitStrategyIds(compositeId)
+    .map((id) => STRATEGIES.find((s) => s.id === id)?.name ?? id)
+    .join(" + ");
 }
 
 export function HistoryView() {
@@ -39,11 +54,16 @@ export function HistoryView() {
 
   if (hasRealSessions && realDebrief) {
     stats = STRATEGIES.map((s) => {
-      const picks = realDebrief.sessions.filter((h) => h.strategyId === s.id);
+      // Dal 25/9/2026 più strategie possono essere ammesse lo stesso giorno (sessions.strategy_id
+      // composito, es. "pairs+vwap_reversion") — "picked" ora conta le sedute con almeno questa
+      // strategia ammessa, e il netto di quel giorno è diviso in parti uguali tra le ammesse
+      // (coerente con l'equal-weight di server/strategyAllocation.ts, ma resta un'approssimazione:
+      // non c'è un netto per-strategia salvato per i giorni condivisi).
+      const picks = realDebrief.sessions.filter((h) => splitStrategyIds(h.strategyId).includes(s.id));
       return {
         strategyId: s.id,
         name: s.name,
-        net: picks.reduce((acc, h) => acc + h.net, 0),
+        net: picks.reduce((acc, h) => acc + h.net / splitStrategyIds(h.strategyId).length, 0),
         timesPicked: picks.length,
         sharpe: null,
         costs: picks.reduce((acc, h) => acc + h.costs, 0),
@@ -57,7 +77,7 @@ export function HistoryView() {
       trades: h.trades,
       costs: h.costs,
     }));
-    tableNote = `Strategia proposta dal debriefing ogni mattina e risultato reale del portafoglio laboratorio corrispondente (${realDebrief.sessions.length} sedut${realDebrief.sessions.length === 1 ? "a" : "e"} reali).`;
+    tableNote = `Strategie ammesse al capitale reale ogni giorno (dal 25/9/2026, anche più insieme) e risultato lab corrispondente (${realDebrief.sessions.length} sedut${realDebrief.sessions.length === 1 ? "a" : "e"} reali).`;
   } else {
     stats = STRATEGY_HISTORY_STATS.map((s) => ({
       strategyId: s.strategyId,
@@ -144,7 +164,7 @@ export function HistoryView() {
             <div className="table-header-cell" style={{ textAlign: "right" }}>COSTI</div>
           </div>
           {sessions.map((h, i) => {
-            const strat = STRATEGIES.find((s) => s.id === h.strategyId)!;
+            const stratName = resolveStrategyNames(h.strategyId);
             return (
               <div
                 key={i}
@@ -159,7 +179,7 @@ export function HistoryView() {
                 }}
               >
                 <div className="mono" style={{ fontSize: 11.5, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{h.date}</div>
-                <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 10 }}>{strat.name}</div>
+                <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 10 }}>{stratName}</div>
                 <div className="mono" style={{ fontSize: 12.5, textAlign: "right", color: pnlColor(h.net) }}>{money(h.net)}</div>
                 <div className="mono" style={{ fontSize: 11.5, textAlign: "right", color: "var(--text-secondary-2)" }}>
                   {(h.deviationPct > 0 ? "+" : "−") + dec(Math.abs(h.deviationPct), 1)}%

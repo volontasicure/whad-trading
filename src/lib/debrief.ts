@@ -8,7 +8,8 @@ export interface RealRankingEntry {
 
 export interface RealSession {
   tradingDate: string;
-  strategyId: StrategyId;
+  /** Dal 25/9/2026 può essere composito ("pairs+vwap_reversion", più strategie ammesse lo stesso giorno) — mai un solo StrategyId garantito. */
+  strategyId: string;
   net: number;
   deviationPct: number;
   trades: number;
@@ -16,12 +17,22 @@ export interface RealSession {
   confirmedAt: string | null;
 }
 
+/** Una riga per strategia: se è ammessa al capitale reale oggi, con che peso, e perché (o perché no). Dal 25/9/2026 (server/strategyAllocation.ts) sostituisce l'unica proposedStrategyId. */
+export interface AllocationEntry {
+  strategyId: StrategyId;
+  eligible: boolean;
+  reason: string;
+  sessionsAvailable: number;
+  drawdownPct: number;
+  /** 0 se non ammessa; altrimenti equal-weight tra le ammesse (sempre <= 1, la somma su tutte fa 1 se almeno una è ammessa). */
+  weight: number;
+}
+
 export interface RealDebrief {
   ranking: RealRankingEntry[];
   /** Quante sedute reali entrano nel calcolo (<20 finché non se ne sono accumulate 20; 0 = nessuno storico ancora, giorno 1). */
   sessionsUsed: number;
-  /** null finché sessionsUsed è 0 — non c'è ancora una proposta sensata da fare. */
-  proposedStrategyId: StrategyId | null;
+  allocation: AllocationEntry[];
   confirmedAt: string | null;
   sessions: RealSession[];
 }

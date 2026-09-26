@@ -5,15 +5,21 @@
 //
 // Gate: nessun ordine senza una riga in debrief_confirmations per la data di oggi — stesso
 // controllo umano che c'è già nella UI ("Conferma e attiva"), qui ha finalmente un effetto.
-// Le uscite valgono per OGNI strategia con posizioni reali aperte (non solo quella scelta
-// oggi): una posizione aperta ieri sotto ORB esce con le regole di ORB anche se oggi è stato
-// scelto VWAP — stessa logica già in tick.ts per i lab.
+// Le uscite valgono per OGNI strategia con posizioni reali aperte (indipendentemente dal peso
+// di oggi): una posizione aperta ieri sotto ORB esce con le regole di ORB anche se oggi ORB ha
+// peso zero — stessa logica già in tick.ts per i lab.
+//
+// Allocazione, dal 25/9/2026 (server/strategyAllocation.ts): il capitale reale non va più a
+// un'unica strategia scelta al mattino ("vincitore prende tutto"), ma è diviso tra tutte le
+// strategie ammesse — storico minimo in paper + drawdown recente sotto soglia — pesate equal-
+// weight. Ogni strategia ammessa apre ingressi nel proprio budget (capital × il suo peso),
+// mai nell'intero capitale. Vedi CLAUDE.md per il ragionamento.
 //
 // Guardrail: rifiuta di inviare ordini se l'ambiente Alpaca configurato non è "paper".
 
 import { alpacaFetch, requireCredentials } from "./alpaca.js";
 import { db } from "./db.js";
-import { computeRanking, PROPOSED_STRATEGY_ID } from "./debrief.js";
+import { computeEligibility, computeWeights } from "./strategyAllocation.js";
 import { sizeByConviction, type SizingCandidate } from "./realSizing.js";
 import { UNIVERSE_SYMBOLS } from "./universe.js";
 import {
@@ -91,7 +97,8 @@ export interface RealExecutionResult {
   skipped: false;
   /** Vero se i nuovi ingressi sono stati bloccati dal limite di perdita giornaliero. */
   haltedByDailyLoss?: boolean;
-  chosenStrategyId: string;
+  /** Strategie ammesse oggi (peso > 0) — vuoto se nessuna supera i gate di server/strategyAllocation.ts. */
+  allocatedStrategies: string[];
   exits: number;
   entries: number;
 }
@@ -357,9 +364,9 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     return { skipped: true, reason: `ambiente Alpaca '${creds.environment}', non 'paper': esecuzione reale bloccata per sicurezza` };
   }
 
-  const { sessionsUsed } = await computeRanking(ctx.tradingDate);
-  if (sessionsUsed === 0) return { skipped: true, reason: "nessuno storico di sedute precedenti ancora" };
-  const chosenStrategyId = PROPOSED_STRATEGY_ID;
+  const eligibility = await computeEligibility(ctx.tradingDate);
+  const weights = computeWeights(eligibility);
+  const allocatedStrategies = eligibility.filter((e) => e.eligible).map((e) => e.strategyId);
 
   const vwapOpen: VwapOpenPosition[] = ctx.openRows
     .filter((r) => r.strategy_id === VWAP_STRATEGY_ID)
@@ -435,7 +442,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     }
   }
 
-  // --- Ingressi: solo per la strategia scelta oggi, solo se non siamo a ridosso della chiusura ---
+  // --- Ingressi: per ogni strategia ammessa oggi (peso > 0), solo se non siamo a ridosso della chiusura ---
   let entryCount = 0;
   let haltedByDailyLoss = false;
   if (!ctx.nearClose) {
@@ -446,108 +453,121 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     const lastEquity = Number(account.last_equity);
     if (lastEquity > 0 && (capital - lastEquity) / lastEquity <= -MAX_DAILY_LOSS_PCT / 100) haltedByDailyLoss = true;
 
+    // Ogni strategia ammessa (peso > 0) apre ingressi nel proprio budget (capital × il suo
+    // peso) — indipendenti tra loro, non più un unico ramo esclusivo. Se una strategia ha peso
+    // zero (esclusa dai gate), il suo blocco è saltato: nessun nuovo ingresso, ma le sue
+    // posizioni già aperte restano gestite normalmente in uscita (sopra).
     if (haltedByDailyLoss) {
       // nessun nuovo ingresso: limite di perdita giornaliero raggiunto
-    } else if (chosenStrategyId === VWAP_STRATEGY_ID) {
-      const stillOpen = new Set(vwapOpen.filter((p) => !vwapExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
-      const freeSlots = VWAP_MAX_POSITIONS - stillOpen.size;
-      // ctx.vwapTrend disponibile ma NON passato qui apposta — stesso interruttore spento di
-      // api/cron/tick.ts, vedi il commento lì.
-      const rawCandidates = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
-      const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
-      const sizingInput: SizingCandidate[] = candidates.map((c) => ({ symbol: c.symbol, price: c.entryPrice, conviction: Math.abs(c.distancePct) }));
-      const sized = sizeByConviction(sizingInput, capital, VWAP_MAX_POSITIONS);
-      for (const c of candidates) {
-        const qty = sized[c.symbol];
-        if (!qty) continue;
-        await openRealPosition({
-          strategyId: VWAP_STRATEGY_ID,
-          symbol: c.symbol,
-          side: c.side,
-          qty,
-          fallbackPrice: c.entryPrice,
-          conviction: Math.abs(c.distancePct),
-          stopPrice: null,
-          targetPrice: null,
-          pairKeyVal: null,
-          now: ctx.now,
-        });
-        entryCount++;
-      }
-    } else if (chosenStrategyId === ORB_STRATEGY_ID) {
-      const stillOpen = new Set(orbOpenReconciled.filter((p) => !orbExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
-      const freeSlots = ORB_MAX_POSITIONS - stillOpen.size;
-      const inputs: Record<string, OrbEntryInputs> = {};
-      for (const symbol of UNIVERSE_SYMBOLS) {
-        const range = ctx.openingRanges[symbol];
-        const atr = ctx.orbAtr[symbol];
-        const volumes = ctx.sessionBarVolumes[symbol] ?? [];
-        const price = ctx.prices[symbol];
-        if (!range || atr == null || volumes.length === 0 || price == null) continue;
-        const avgVol = volumes.reduce((s, v) => s + v, 0) / volumes.length;
-        inputs[symbol] = { price, openingRange: range, atrPct: atr, avgBarVolume: avgVol, latestBarVolume: volumes[volumes.length - 1] };
-      }
-      const rawCandidates = decideOrbEntries(UNIVERSE_SYMBOLS, stillOpen, inputs, freeSlots);
-      const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
-      const sizingInput: SizingCandidate[] = candidates.map((c) => {
-        const range = ctx.openingRanges[c.symbol];
-        const conviction = range ? Math.abs(orbBreakoutStrength(c.entryPrice, c.side, range)) : 0;
-        return { symbol: c.symbol, price: c.entryPrice, conviction };
-      });
-      const sized = sizeByConviction(sizingInput, capital, ORB_MAX_POSITIONS);
-      for (const c of candidates) {
-        const qty = sized[c.symbol];
-        if (!qty) continue;
-        const range = ctx.openingRanges[c.symbol];
-        await openRealPosition({
-          strategyId: ORB_STRATEGY_ID,
-          symbol: c.symbol,
-          side: c.side,
-          qty,
-          fallbackPrice: c.entryPrice,
-          conviction: range ? Math.abs(orbBreakoutStrength(c.entryPrice, c.side, range)) : 0,
-          stopPrice: c.stopPrice,
-          targetPrice: c.targetPrice,
-          pairKeyVal: null,
-          now: ctx.now,
-        });
-        entryCount++;
-      }
-    } else if (chosenStrategyId === PAIRS_STRATEGY_ID) {
-      const stillOpenKeys = new Set(pairsOpen.filter((leg) => !pairsExits.some((e) => e.legIds.includes(leg.id))).map((leg) => leg.pairKey));
-      const freeSlots = MAX_PAIRS - stillOpenKeys.size;
-      const pairsExcludedKeys = new Set([...stillOpenKeys, ...ctx.stoppedPairsToday]);
-      const rawCandidates = decidePairsEntries(ctx.pairStats, pairsExcludedKeys, ctx.prices, freeSlots);
-      const candidates = await filterShortableCandidates(rawCandidates, (c) => c.legs);
-      // Una coppia = un candidato di sizing, prezzo fittizio 1 -> la qty restituita è
-      // direttamente il budget in dollari per la coppia, diviso poi a metà tra le due gambe
-      // (stesso schema "capitale diviso a metà" di pairsTrading.ts, solo con budget variabile
-      // invece di CAPITAL/MAX_PAIRS fisso).
-      const sizingInput: SizingCandidate[] = candidates.map((c) => ({ symbol: c.pairKey, price: 1, conviction: Math.abs(c.z) }));
-      const sizedDollars = sizeByConviction(sizingInput, capital, MAX_PAIRS);
-      for (const c of candidates) {
-        const dollars = sizedDollars[c.pairKey];
-        if (!dollars) continue;
-        const dollarsPerLeg = dollars / 2;
-        for (const leg of c.legs) {
-          const qty = Math.max(1, Math.floor(dollarsPerLeg / leg.entryPrice));
+    } else {
+      if (weights[VWAP_STRATEGY_ID] > 0) {
+        const vwapCapital = capital * weights[VWAP_STRATEGY_ID];
+        const stillOpen = new Set(vwapOpen.filter((p) => !vwapExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
+        const freeSlots = VWAP_MAX_POSITIONS - stillOpen.size;
+        // ctx.vwapTrend disponibile ma NON passato qui apposta — stesso interruttore spento di
+        // api/cron/tick.ts, vedi il commento lì.
+        const rawCandidates = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
+        const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
+        const sizingInput: SizingCandidate[] = candidates.map((c) => ({ symbol: c.symbol, price: c.entryPrice, conviction: Math.abs(c.distancePct) }));
+        const sized = sizeByConviction(sizingInput, vwapCapital, VWAP_MAX_POSITIONS);
+        for (const c of candidates) {
+          const qty = sized[c.symbol];
+          if (!qty) continue;
           await openRealPosition({
-            strategyId: PAIRS_STRATEGY_ID,
-            symbol: leg.symbol,
-            side: leg.side,
+            strategyId: VWAP_STRATEGY_ID,
+            symbol: c.symbol,
+            side: c.side,
             qty,
-            fallbackPrice: leg.entryPrice,
-            conviction: Math.abs(c.z),
+            fallbackPrice: c.entryPrice,
+            conviction: Math.abs(c.distancePct),
             stopPrice: null,
             targetPrice: null,
-            pairKeyVal: c.pairKey,
+            pairKeyVal: null,
             now: ctx.now,
           });
           entryCount++;
         }
       }
+
+      if (weights[ORB_STRATEGY_ID] > 0) {
+        const orbCapital = capital * weights[ORB_STRATEGY_ID];
+        const stillOpen = new Set(orbOpenReconciled.filter((p) => !orbExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
+        const freeSlots = ORB_MAX_POSITIONS - stillOpen.size;
+        const inputs: Record<string, OrbEntryInputs> = {};
+        for (const symbol of UNIVERSE_SYMBOLS) {
+          const range = ctx.openingRanges[symbol];
+          const atr = ctx.orbAtr[symbol];
+          const volumes = ctx.sessionBarVolumes[symbol] ?? [];
+          const price = ctx.prices[symbol];
+          if (!range || atr == null || volumes.length === 0 || price == null) continue;
+          const avgVol = volumes.reduce((s, v) => s + v, 0) / volumes.length;
+          inputs[symbol] = { price, openingRange: range, atrPct: atr, avgBarVolume: avgVol, latestBarVolume: volumes[volumes.length - 1] };
+        }
+        const rawCandidates = decideOrbEntries(UNIVERSE_SYMBOLS, stillOpen, inputs, freeSlots);
+        const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
+        const sizingInput: SizingCandidate[] = candidates.map((c) => {
+          const range = ctx.openingRanges[c.symbol];
+          const conviction = range ? Math.abs(orbBreakoutStrength(c.entryPrice, c.side, range)) : 0;
+          return { symbol: c.symbol, price: c.entryPrice, conviction };
+        });
+        const sized = sizeByConviction(sizingInput, orbCapital, ORB_MAX_POSITIONS);
+        for (const c of candidates) {
+          const qty = sized[c.symbol];
+          if (!qty) continue;
+          const range = ctx.openingRanges[c.symbol];
+          await openRealPosition({
+            strategyId: ORB_STRATEGY_ID,
+            symbol: c.symbol,
+            side: c.side,
+            qty,
+            fallbackPrice: c.entryPrice,
+            conviction: range ? Math.abs(orbBreakoutStrength(c.entryPrice, c.side, range)) : 0,
+            stopPrice: c.stopPrice,
+            targetPrice: c.targetPrice,
+            pairKeyVal: null,
+            now: ctx.now,
+          });
+          entryCount++;
+        }
+      }
+
+      if (weights[PAIRS_STRATEGY_ID] > 0) {
+        const pairsCapital = capital * weights[PAIRS_STRATEGY_ID];
+        const stillOpenKeys = new Set(pairsOpen.filter((leg) => !pairsExits.some((e) => e.legIds.includes(leg.id))).map((leg) => leg.pairKey));
+        const freeSlots = MAX_PAIRS - stillOpenKeys.size;
+        const pairsExcludedKeys = new Set([...stillOpenKeys, ...ctx.stoppedPairsToday]);
+        const rawCandidates = decidePairsEntries(ctx.pairStats, pairsExcludedKeys, ctx.prices, freeSlots);
+        const candidates = await filterShortableCandidates(rawCandidates, (c) => c.legs);
+        // Una coppia = un candidato di sizing, prezzo fittizio 1 -> la qty restituita è
+        // direttamente il budget in dollari per la coppia, diviso poi a metà tra le due gambe
+        // (stesso schema "capitale diviso a metà" di pairsTrading.ts, solo con budget variabile
+        // invece di CAPITAL/MAX_PAIRS fisso — qui il budget è già la sola quota pairs).
+        const sizingInput: SizingCandidate[] = candidates.map((c) => ({ symbol: c.pairKey, price: 1, conviction: Math.abs(c.z) }));
+        const sizedDollars = sizeByConviction(sizingInput, pairsCapital, MAX_PAIRS);
+        for (const c of candidates) {
+          const dollars = sizedDollars[c.pairKey];
+          if (!dollars) continue;
+          const dollarsPerLeg = dollars / 2;
+          for (const leg of c.legs) {
+            const qty = Math.max(1, Math.floor(dollarsPerLeg / leg.entryPrice));
+            await openRealPosition({
+              strategyId: PAIRS_STRATEGY_ID,
+              symbol: leg.symbol,
+              side: leg.side,
+              qty,
+              fallbackPrice: leg.entryPrice,
+              conviction: Math.abs(c.z),
+              stopPrice: null,
+              targetPrice: null,
+              pairKeyVal: c.pairKey,
+              now: ctx.now,
+            });
+            entryCount++;
+          }
+        }
+      }
     }
   }
 
-  return { skipped: false, chosenStrategyId, exits: exitCount, entries: entryCount, haltedByDailyLoss };
+  return { skipped: false, allocatedStrategies, exits: exitCount, entries: entryCount, haltedByDailyLoss };
 }

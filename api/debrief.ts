@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { db } from "../server/db.js";
-import { computeRanking, PROPOSED_STRATEGY_ID } from "../server/debrief.js";
+import { computeRanking } from "../server/debrief.js";
+import { computeEligibility, computeWeights } from "../server/strategyAllocation.js";
 
 interface SessionRow {
   trading_date: string;
@@ -15,13 +16,13 @@ interface SessionRow {
 const HISTORY_LIMIT = 20;
 
 /**
- * GET: classifica del debriefing (netto reale ultime 20 sedute), proposta del giorno, stato
- * di conferma di oggi, e storico sedute reale — tutto da lab_positions/sessions, niente dati
- * finti. proposedStrategyId è null finché non esiste ancora nessuna seduta chiusa (giorno 1).
+ * GET: classifica del debriefing (netto reale ultime 20 sedute, solo informativa), allocazione
+ * del capitale reale di oggi (server/strategyAllocation.ts: quali strategie sono ammesse e con
+ * che peso — dal 25/9/2026 non è più un'unica proposta esclusiva), stato di conferma di oggi, e
+ * storico sedute reale — tutto da lab_positions/sessions, niente dati finti.
  *
- * POST: registra la conferma di oggi (bottone "Conferma e attiva"). Non esegue nessun ordine
- * reale — vedi CLAUDE.md "Prossimi passi" #2, ancora da progettare — segna solo che l'utente
- * ha confermato la proposta; la riga sessions per oggi verrà scritta stasera da eod-close.ts,
+ * POST: registra la conferma di oggi (bottone "Conferma e attiva"). Segna solo che l'utente ha
+ * confermato l'allocazione; la riga sessions per oggi verrà scritta stasera da eod-close.ts,
  * che a quel punto legge questa conferma.
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -49,10 +50,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     const tradingDate = new Date().toISOString().slice(0, 10);
+    // ranking/sessionsUsed restano solo per la tabella di classifica mostrata in UI — non
+    // decidono più l'allocazione, vedi server/strategyAllocation.ts sotto.
     const { entries, sessionsUsed } = await computeRanking(tradingDate);
-    // Dal 23/9/2026 la proposta non è più il primo della classifica — vedi PROPOSED_STRATEGY_ID
-    // in server/debrief.ts. entries/sessionsUsed restano solo per la tabella di classifica.
-    const proposedStrategyId = sessionsUsed > 0 ? PROPOSED_STRATEGY_ID : null;
+    const eligibility = await computeEligibility(tradingDate);
+    const weights = computeWeights(eligibility);
+    const allocation = eligibility.map((e) => ({ ...e, weight: weights[e.strategyId] ?? 0 }));
 
     const confirmRows = (await db()`
       SELECT confirmed_at FROM debrief_confirmations WHERE trading_date = ${tradingDate}
@@ -67,7 +70,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(200).json({
       ranking: entries,
       sessionsUsed,
-      proposedStrategyId,
+      allocation,
       confirmedAt: confirmRows[0]?.confirmed_at ?? null,
       sessions: sessionRows.map((r) => ({
         tradingDate: r.trading_date,

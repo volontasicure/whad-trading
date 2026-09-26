@@ -3,7 +3,8 @@ import { alpacaFetch } from "../../server/alpaca.js";
 import { db } from "../../server/db.js";
 import { fetchMarketSession } from "../../server/marketHours.js";
 import { CAPITAL } from "../../server/pairsTrading.js";
-import { computeRanking, todayResultFor, STRATEGY_IDS, PROPOSED_STRATEGY_ID } from "../../server/debrief.js";
+import { todayResultFor, STRATEGY_IDS } from "../../server/debrief.js";
+import { computeEligibility } from "../../server/strategyAllocation.js";
 
 interface AlpacaClock {
   is_open: boolean;
@@ -126,22 +127,20 @@ function decideRealEodCloses(positions: AlpacaPosition[], openRows: RealOpenRow[
 /**
  * Scrive la riga sessions di oggi (storico reale del debriefing) — una volta sola, qui,
  * perché questo cron gira una volta al giorno vicino alla chiusura ed è il momento in cui
- * "il risultato reale di oggi" è finalmente conosciuto. strategy_id è la proposta del
- * debriefing di stamattina: lo stesso calcolo (server/debrief.ts) usato da GET /api/debrief,
- * ricalcolato qui invece di fidarsi di uno stato salvato — usa solo sedute *precedenti* a
- * oggi, quindi il risultato è identico a qualunque ora venga chiesto. Se non c'è ancora
- * nessuno storico (giorno 1), non scrive nulla: non esiste una proposta sensata da segnare.
- * Best-effort: un problema qui non deve mai far fallire la chiusura reale sopra, che è la
- * responsabilità primaria di questo endpoint.
+ * "il risultato reale di oggi" è finalmente conosciuto. Dal 25/9/2026 (server/strategyAllocation.ts,
+ * niente più un'unica proposta esclusiva): strategy_id è l'elenco delle strategie ammesse oggi
+ * unite da "+" (es. "pairs+vwap"), net/trades sono la somma su quelle stesse, calcolati sul lab
+ * (todayResultFor, sedute *precedenti* a oggi per l'ammissione — il risultato è identico a
+ * qualunque ora venga chiesto). Se nessuna strategia è ammessa, non scrive nulla — non esiste
+ * un risultato sensato da segnare quel giorno. Best-effort: un problema qui non deve mai far
+ * fallire la chiusura reale sopra, che è la responsabilità primaria di questo endpoint.
  */
 async function finalizeTodaySession(): Promise<{ skipped: true; reason: string } | { skipped: false; strategyId: string; net: number }> {
   const tradingDate = new Date().toISOString().slice(0, 10);
-  const { sessionsUsed } = await computeRanking(tradingDate);
-  if (sessionsUsed === 0) return { skipped: true, reason: "nessuno storico di sedute precedenti ancora" };
+  const eligibility = await computeEligibility(tradingDate);
+  const allocatedIds = eligibility.filter((e) => e.eligible).map((e) => e.strategyId);
+  if (allocatedIds.length === 0) return { skipped: true, reason: "nessuna strategia ammessa oggi (vedi computeEligibility)" };
 
-  // Dal 23/9/2026 la proposta non è più il primo della classifica — vedi PROPOSED_STRATEGY_ID
-  // in server/debrief.ts.
-  const proposedStrategyId = PROPOSED_STRATEGY_ID;
   const session = await fetchMarketSession(tradingDate);
   if (!session) return { skipped: true, reason: "nessuna sessione di mercato per oggi nel calendario" };
 
@@ -149,13 +148,15 @@ async function finalizeTodaySession(): Promise<{ skipped: true; reason: string }
   for (const id of STRATEGY_IDS) {
     todayByStrategy.set(id, await todayResultFor(id, session.openUtc));
   }
-  const proposedToday = todayByStrategy.get(proposedStrategyId)?.net ?? 0;
-  const proposedTrades = todayByStrategy.get(proposedStrategyId)?.trades ?? 0;
-  const others = STRATEGY_IDS.filter((id) => id !== proposedStrategyId).map((id) => todayByStrategy.get(id)?.net ?? 0);
-  const avgOthers = others.reduce((s, n) => s + n, 0) / others.length;
-  // % di quanto il lab scelto si è discostato dalla media degli altri due, sul capitale — non
-  // "lab vs conto reale" (non ancora eseguito per davvero, vedi CLAUDE.md Prossimi passi #2).
-  const deviationPct = ((proposedToday - avgOthers) / CAPITAL) * 100;
+  const strategyIdLabel = allocatedIds.join("+");
+  const allocatedToday = allocatedIds.reduce((s, id) => s + (todayByStrategy.get(id)?.net ?? 0), 0);
+  const allocatedTrades = allocatedIds.reduce((s, id) => s + (todayByStrategy.get(id)?.trades ?? 0), 0);
+  const excludedIds = STRATEGY_IDS.filter((id) => !allocatedIds.includes(id));
+  const avgAllocated = allocatedToday / allocatedIds.length;
+  const avgExcluded = excludedIds.length > 0 ? excludedIds.reduce((s, id) => s + (todayByStrategy.get(id)?.net ?? 0), 0) / excludedIds.length : avgAllocated;
+  // % di quanto la media delle strategie ammesse si è discostata dalla media delle escluse, sul
+  // capitale di un lab — non "lab vs conto reale" (vedi CLAUDE.md Prossimi passi #2).
+  const deviationPct = ((avgAllocated - avgExcluded) / CAPITAL) * 100;
 
   const confirmRows = (await db()`
     SELECT confirmed_at FROM debrief_confirmations WHERE trading_date = ${tradingDate}
@@ -163,13 +164,13 @@ async function finalizeTodaySession(): Promise<{ skipped: true; reason: string }
 
   await db()`
     INSERT INTO sessions (trading_date, strategy_id, net, deviation_pct, trades, costs, confirmed_at)
-    VALUES (${tradingDate}, ${proposedStrategyId}, ${proposedToday}, ${deviationPct}, ${proposedTrades}, 0, ${confirmRows[0]?.confirmed_at ?? null})
+    VALUES (${tradingDate}, ${strategyIdLabel}, ${allocatedToday}, ${deviationPct}, ${allocatedTrades}, 0, ${confirmRows[0]?.confirmed_at ?? null})
     ON CONFLICT (trading_date) DO UPDATE SET
       strategy_id = EXCLUDED.strategy_id, net = EXCLUDED.net, deviation_pct = EXCLUDED.deviation_pct,
       trades = EXCLUDED.trades, costs = EXCLUDED.costs, confirmed_at = EXCLUDED.confirmed_at
   `;
 
-  return { skipped: false, strategyId: proposedStrategyId, net: proposedToday };
+  return { skipped: false, strategyId: strategyIdLabel, net: allocatedToday };
 }
 
 /**

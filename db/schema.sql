@@ -47,12 +47,12 @@ CREATE TABLE IF NOT EXISTS lab_state (
 );
 
 -- Storico sedute reale (sostituisce i dati finti SESSIONS in mockData.ts). Una riga per
--- giorno, scritta una sola volta a fine giornata da api/cron/eod-close.ts: strategy_id è
--- la proposta del debriefing di quel mattino (la meglio classificata sul netto reale delle
--- sedute precedenti), net/trades sono il risultato REALE di quel lab quel giorno — non c'è
--- ancora un conto reale eseguito (vedi CLAUDE.md "Prossimi passi" #2), quindi "storico
--- reale" qui significa "il lab che sarebbe stato scelto e come è andato davvero", non
--- l'esito di ordini reali piazzati. costs è sempre 0: le strategie non modellano commissioni
+-- giorno, scritta una sola volta a fine giornata da api/cron/eod-close.ts. Dal 25/9/2026
+-- (server/strategyAllocation.ts, niente più un'unica proposta esclusiva): strategy_id è
+-- l'elenco delle strategie ammesse al capitale reale quel giorno, unite da "+" (es.
+-- "pairs+vwap_reversion"); net/trades sono la somma dei risultati LAB di quelle stesse
+-- strategie quel giorno (non l'esito degli ordini reali piazzati — quello è in
+-- real_positions/getRealizedPnl). costs è sempre 0: le strategie non modellano commissioni
 -- separate dal realized_pnl (limite noto, non ancora affrontato).
 CREATE TABLE IF NOT EXISTS sessions (
   trading_date DATE PRIMARY KEY,

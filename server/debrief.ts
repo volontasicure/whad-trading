@@ -10,23 +10,18 @@ import { STRATEGY_ID as PAIRS_STRATEGY_ID } from "./pairsTrading.js";
 export const STRATEGY_IDS = [ORB_STRATEGY_ID, VWAP_STRATEGY_ID, PAIRS_STRATEGY_ID] as const;
 export const RANKING_LOOKBACK_SESSIONS = 20;
 
-/**
- * Strategia proposta per il conto reale, dal 23/9/2026. Non è più "vincitore delle ultime 20
- * sedute" (il vecchio entries[0] di computeRanking): quella regola si è dimostrata non robusta
- * su due checkpoint indipendenti a 5 giorni di distanza (18/9: +2.555 recente / −356 fuori
- * campione; 23/9: +375 / −1.090, ancora negativa fuori campione) e nella pratica ha tenuto il
- * conto reale ancorato a ORB fin dal 15/9 per un solo giorno fortunato (+583) che il pairs,
- * più lento ma costante, non ha mai superato in classifica — mentre ORB è oggi negativo su
- * entrambe le finestre del backtest (−934 / −1.232). "Sempre pairs" è invece l'unica regola
- * risultata positiva in tutt'e quattro le finestre misurate finora (683/1.498 il 18/9,
- * 894/1.013 il 23/9). Rischio noto: il pairs trading non aveva ancora girato un giorno vero sul
- * conto reale prima di questo cambio — ordini a due gambe, controllo shortable, chiusura EOD
- * condizionata al P&L combinato sono verificati solo su backtest, da tenere d'occhio nei primi
- * giorni (comunque paper trading, non capitale vero). computeRanking() resta invariata e
- * continua ad alimentare solo la tabella di classifica mostrata nella UI, a scopo informativo —
- * non decide più la proposta. Rivedere questa scelta tra 1-2 settimane con più dati reali.
- */
-export const PROPOSED_STRATEGY_ID: string = PAIRS_STRATEGY_ID;
+// Storia della proposta per il conto reale, per contesto:
+// - Fino al 22/9/2026: "vincitore delle ultime 20 sedute" (entries[0] di computeRanking) — si è
+//   dimostrata non robusta su due checkpoint indipendenti a 5 giorni di distanza (18/9: +2.555
+//   recente / −356 fuori campione; 23/9: +375 / −1.090, ancora negativa fuori campione) e ha
+//   tenuto il conto reale ancorato a ORB fin dal 15/9 per un solo giorno fortunato.
+// - Dal 23/9 al 24/9/2026: un'unica proposta esclusiva fissa su "sempre pairs" (l'unica regola
+//   risultata positiva in tutte le finestre misurate).
+// - Dal 25/9/2026: niente più un'unica proposta esclusiva — vedi server/strategyAllocation.ts
+//   (computeEligibility/computeWeights), che ammette più strategie insieme al capitale reale,
+//   ciascuna pesata equal-weight, con un requisito di storico minimo e un drawdown massimo
+//   automatico. computeRanking() qui sotto resta invariata e alimenta solo la tabella di
+//   classifica mostrata nella UI, a scopo informativo — non decide l'allocazione.
 
 export interface RankingEntry {
   strategyId: string;
