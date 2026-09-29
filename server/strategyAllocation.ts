@@ -6,11 +6,15 @@
 // problema di costruzione del portafoglio, non di segnale. Qui più strategie possono ricevere
 // capitale reale insieme, ciascuna con una frazione, non un'unica proposta esclusiva.
 //
-// Due gate, entrambi nuovi (prima non esisteva nessun requisito prima che una strategia
-// ricevesse capitale reale, oltre alla classifica del giorno):
+// Tre gate (i primi due dal 25/9/2026, il terzo dal 29/9 — prima non esisteva nessun
+// requisito prima che una strategia ricevesse capitale reale, oltre alla classifica del
+// giorno):
 // 1. Storico minimo in paper (lab) prima di poter ricevere capitale reale — "periodo di prova".
-// 2. Uno stop automatico per singola strategia sul drawdown recente, non più una decisione
-//    discrezionale presa ad hoc (come per ORB questa settimana).
+// 2. Uno stop automatico per singola strategia sul drawdown recente (picco-valle).
+// 3. Media mobile corta (ultime 5 sedute) non negativa — aggiunta il 29/9/2026: il drawdown
+//    picco-valle (punto 2) non intercetta un'erosione lenta e rumorosa come quella di ORB
+//    (oscilla tra giorni positivi e negativi senza un vero crollo continuo, mai sopra il 5% di
+//    drawdown nonostante fosse negativo quasi ogni giorno). Vedi CLAUDE.md.
 //
 // Il lab resta la base per queste decisioni (non real_positions): è la simulazione con più
 // storia disponibile per tutte e tre le strategie fin dal 13-14/9, mentre il conto reale ha
@@ -44,12 +48,29 @@ export const MIN_TRACK_RECORD_SESSIONS = 8;
 export const MAX_DRAWDOWN_PCT = 5.0;
 export const DRAWDOWN_LOOKBACK_SESSIONS = 20;
 
+/**
+ * Media del netto giornaliero sulle ultime RECENT_AVG_LOOKBACK_SESSIONS sedute lab: se scende
+ * sotto MIN_RECENT_AVG_NET, la strategia esce dall'allocazione reale finché non risale. Una
+ * finestra corta (5, non 20 come il drawdown) per restare reattiva a un'inversione recente —
+ * l'obiettivo è distinguere "negativa da settimane" da "si è appena ripresa", non solo
+ * "negativa oggi". Scelta il 29/9/2026 guardando i dati di quel giorno (ORB media ultime 5
+ * sedute −351$, VWAP +129$, pairs +4$) — non validata su una finestra storica indipendente,
+ * a differenza della maggior parte delle altre decisioni di questo progetto: è un cambio di
+ * struttura del portafoglio, non un parametro di segnale, e non c'è uno storico "cosa sarebbe
+ * successo con questa regola" da rigiocare facilmente (stesso limite già accettato per
+ * l'allocazione ripartita del 25/9). Rischio dichiarato di averla tarata sul risultato
+ * desiderato più che su un principio indipendente — da rivedere con più dati.
+ */
+export const MIN_RECENT_AVG_NET = 0;
+export const RECENT_AVG_LOOKBACK_SESSIONS = 5;
+
 export interface StrategyEligibility {
   strategyId: string;
   eligible: boolean;
   reason: string;
   sessionsAvailable: number;
   drawdownPct: number;
+  recentAvgNet: number;
 }
 
 /**
@@ -82,6 +103,11 @@ export async function computeEligibility(beforeDateIso: string): Promise<Strateg
     }
     const drawdownPct = (maxDrawdownDollars / LAB_CAPITAL_REF) * 100;
 
+    // Media mobile corta, ultime RECENT_AVG_LOOKBACK_SESSIONS sedute (indipendente dalla
+    // finestra del drawdown sopra).
+    const recentShort = rows.slice(-RECENT_AVG_LOOKBACK_SESSIONS);
+    const recentAvgNet = recentShort.length > 0 ? recentShort.reduce((s, r) => s + r.net, 0) / recentShort.length : 0;
+
     let eligible = true;
     let reason = "ammessa";
     if (sessionsAvailable < MIN_TRACK_RECORD_SESSIONS) {
@@ -90,9 +116,12 @@ export async function computeEligibility(beforeDateIso: string): Promise<Strateg
     } else if (drawdownPct > MAX_DRAWDOWN_PCT) {
       eligible = false;
       reason = `drawdown recente ${drawdownPct.toFixed(1)}% oltre la soglia ${MAX_DRAWDOWN_PCT}%`;
+    } else if (recentAvgNet < MIN_RECENT_AVG_NET) {
+      eligible = false;
+      reason = `media ultime ${RECENT_AVG_LOOKBACK_SESSIONS} sedute ${recentAvgNet.toFixed(0)}$, sotto soglia`;
     }
 
-    out.push({ strategyId, eligible, reason, sessionsAvailable, drawdownPct });
+    out.push({ strategyId, eligible, reason, sessionsAvailable, drawdownPct, recentAvgNet });
   }
   return out;
 }
