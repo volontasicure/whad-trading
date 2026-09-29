@@ -6,6 +6,7 @@ import { decideLabEodCloses, type LabOpenRow } from "../../server/labEod.js";
 import { fetchMarketSession } from "../../server/marketHours.js";
 import { saveDailyBars, saveSessionBars } from "../../server/barsStore.js";
 import { runRealExecution, type RealPositionRow } from "../../server/realExecution.js";
+import { runRealEodClose, finalizeTodaySession } from "../../server/realEod.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
   STRATEGY_ID as ORB_STRATEGY_ID,
@@ -522,6 +523,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       eodClosedCount = singleCloses.length + pairLegsClosed;
     }
 
+    // --- Chiusura EOD reale (conto Alpaca), a ridosso della chiusura — percorso primario dal
+    // 29/9/2026 (prima solo su api/cron/eod-close.ts, un cron separato arrivato sempre più in
+    // ritardo dal 24/9, vedi server/realEod.ts per la cronologia completa). Best-effort e
+    // indipendente dalla conferma del debriefing di oggi: chiudere posizioni già aperte non
+    // deve dipendere da quella conferma, solo aprirne di nuove (gate dentro runRealExecution).
+    // eod-close.ts resta attivo come backup ridondante, stesse funzioni condivise.
+    let realEodNote = "";
+    if (nearClose) {
+      try {
+        const closeResult = await runRealEodClose();
+        let sessionResult: Awaited<ReturnType<typeof finalizeTodaySession>>;
+        try {
+          sessionResult = await finalizeTodaySession();
+        } catch (err) {
+          sessionResult = { skipped: true, reason: `errore: ${(err as Error).message}` };
+        }
+        realEodNote = ` · EOD reale: ${closeResult.closed} chiuse/${closeResult.failed} fallite${closeResult.errors.length > 0 ? ` (${closeResult.errors.join("; ")})` : ""}, sessions: ${sessionResult.skipped ? `saltata (${sessionResult.reason})` : "ok"}`;
+      } catch (err) {
+        realEodNote = ` · EOD reale: errore (${(err as Error).message})`;
+      }
+    }
+
     // --- Esecuzione reale (conto Alpaca, ambiente paper): solo se il debriefing di oggi è
     // stato confermato. Best-effort in senso stretto solo per l'isolamento dei tre lab sopra
     // — un problema qui non deve mai impedire di salvare il tick dei lab — ma un errore reale
@@ -555,7 +578,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       realNote = `reale: errore (${(err as Error).message})`;
     }
 
-    const note = `vwap: ${vwapExits.length} chiuse/${entriesSummary.vwap} aperte · orb: ${orbExits.length} chiuse/${entriesSummary.orb} aperte · pairs: ${pairsExits.length} chiuse/${entriesSummary.pairs} aperte${nearClose ? ` · EOD: ${eodClosedCount} chiuse` : ""} · ${realNote}`;
+    const note = `vwap: ${vwapExits.length} chiuse/${entriesSummary.vwap} aperte · orb: ${orbExits.length} chiuse/${entriesSummary.orb} aperte · pairs: ${pairsExits.length} chiuse/${entriesSummary.pairs} aperte${nearClose ? ` · EOD: ${eodClosedCount} chiuse` : ""}${realEodNote} · ${realNote}`;
     await db()`INSERT INTO tick_log (market_open, note) VALUES (true, ${note})`;
 
     res.status(200).json({ marketOpen: true, nearClose, note, entriesSummary, eodClosedCount });
