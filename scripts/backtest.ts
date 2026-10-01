@@ -154,12 +154,17 @@ if (EXP_VWAP_EXTENSION_PCT != null) console.log(`VWAP: soglia estensione overrid
 
 // Variante sulla regola EOD stessa, valutata il 1/10/2026 su uno storico molto più lungo (fino
 // a ~6 mesi, non più 39+39 giorni) per ridiscutere "ha senso chiudere sempre tutto ogni
-// giorno". "current" (default) = produzione: singole sempre (decideLabEodCloses, già
-// incondizionato), pairs solo se in utile combinato (decidePairsEodCloses). "always" forza la
-// chiusura anche dei pairs, a prescindere dal P&L combinato. "never" disattiva la rete di
-// sicurezza EOD per entrambi: le posizioni escono solo per le loro regole normali (stop/
-// target/tempo/z-score), possono restare aperte durante la notte indefinitamente.
-const EXP_EOD_MODE = (process.env.EXP_EOD_MODE as "current" | "always" | "never" | undefined) ?? "current";
+// giorno". "current" (default) = produzione dall'1/10/2026: singole sempre (decideLabEodCloses,
+// già incondizionato), pairs MAI per regola EOD (escono solo per z-score, decidePairsExits).
+// "pairs-if-profit" = la regola precedente (22/9-30/9/2026): pairs chiusi insieme solo se il
+// P&L combinato era positivo — tenuta solo per confronto storico, non più in produzione, il
+// backtest di quel giorno ha mostrato che sostituiva di fatto l'uscita vera della strategia con
+// un incasso anticipato (168 chiusure su 189 erano l'EOD opportunistico, solo 2 il vero
+// rientro). "always" forza la chiusura anche dei pairs, a prescindere dal P&L combinato.
+// "never" disattiva la rete di sicurezza EOD anche per le singole: le posizioni escono solo
+// per le loro regole normali (stop/target/tempo), possono restare aperte durante la notte
+// indefinitamente — bocciata per ORB/VWAP (vedi CLAUDE.md), mai adottata per quelle due.
+const EXP_EOD_MODE = (process.env.EXP_EOD_MODE as "current" | "pairs-if-profit" | "always" | "never" | undefined) ?? "current";
 if (EXP_EOD_MODE !== "current") console.log(`EOD: modalità override = "${EXP_EOD_MODE}" (produzione: "current")`);
 const dailyNet: Record<"orb" | "vwap" | "pairs", number[]> = { orb: [], vwap: [], pairs: [] };
 
@@ -584,7 +589,7 @@ async function run() {
     }
 
     let pairEodCloses: ReturnType<typeof decidePairsEodCloses> = [];
-    if (EXP_EOD_MODE === "current") {
+    if (EXP_EOD_MODE === "pairs-if-profit") {
       try {
         pairEodCloses = decidePairsEodCloses(pairsOpen, lastPrices);
       } catch (e) {
@@ -606,7 +611,9 @@ async function run() {
         }
       }
     }
-    // EXP_EOD_MODE === "never": pairEodCloses resta [], nessuna chiusura forzata.
+    // EXP_EOD_MODE === "current" (produzione) o "never": pairEodCloses resta [], nessuna
+    // chiusura forzata dei pairs — per "current" le singole sotto restano comunque sempre
+    // chiuse (decideLabEodCloses, incondizionato), solo per "never" si disattivano anche quelle.
     const pairEodLegIds = new Set<number>();
     for (const pc of pairEodCloses) {
       for (const legId of pc.legIds) {

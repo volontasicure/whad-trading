@@ -95,21 +95,22 @@ async function closeAndRecord(p: AlpacaEodPosition): Promise<void> {
 /**
  * Determina quali posizioni Alpaca chiudere a fine giornata: le singole (ORB/VWAP — nessun
  * pair_key in real_positions) sempre, in utile o in perdita, dal 22/9/2026 — stessa regola e
- * stessa evidenza da backtest di decideLabEodCloses (server/labEod.ts, dettagli lì). Le
- * gambe di una coppia (pair_key valorizzato) restano sulla regola precedente: chiudono
- * insieme solo se il P&L combinato è positivo, mai una gamba sola, stesso principio di
- * decidePairsEodCloses (server/pairsTrading.ts) — riprodotto qui sui dati Alpaca. Una
- * posizione Alpaca senza riga corrispondente in real_positions (non dovrebbe succedere) resta
- * sulla vecchia regola prudente "chiudi solo se in utile".
+ * stessa evidenza da backtest di decideLabEodCloses (server/labEod.ts, dettagli lì). Le gambe
+ * di una coppia (pair_key valorizzato) non si chiudono MAI per regola EOD, dall'1/10/2026 —
+ * escono solo per z-score (decidePairsExits, server/pairsTrading.ts: rientro o stop), mai per
+ * il solo fatto che sia finita la giornata. Prima (dal 22/9) chiudevano insieme se il P&L
+ * combinato era positivo: backtest su due finestre indipendenti di quasi 200 sedute ha mostrato
+ * che quella regola di fatto sostituiva l'uscita vera della strategia con un incasso anticipato
+ * (168 chiusure su 189 erano l'EOD opportunistico, solo 2 il vero rientro dello z-score) e
+ * tagliava la reversione prima che si completasse — rimuovendola il pairs migliora su
+ * entrambe le finestre (+1.898→+2.376 recente, +2.401→+2.725 fuori campione), a differenza di
+ * ORB/VWAP dove la stessa idea ("mai chiudere nulla") migliora una finestra e peggiora
+ * nettamente l'altra — vedi CLAUDE.md "Backtest approfondito, 1/10/2026". Una posizione Alpaca
+ * senza riga corrispondente in real_positions (non dovrebbe succedere) resta sulla vecchia
+ * regola prudente "chiudi solo se in utile".
  */
 export function decideRealEodCloses(positions: AlpacaEodPosition[], openRows: RealEodOpenRow[]): AlpacaEodPosition[] {
   const rowBySymbol = new Map(openRows.map((r) => [r.symbol, r]));
-  const pairGroups = new Map<string, RealEodOpenRow[]>();
-  for (const r of openRows) {
-    if (!r.pair_key) continue;
-    if (!pairGroups.has(r.pair_key)) pairGroups.set(r.pair_key, []);
-    pairGroups.get(r.pair_key)!.push(r);
-  }
 
   const symbolsToClose = new Set<string>();
   for (const p of positions) {
@@ -119,20 +120,6 @@ export function decideRealEodCloses(positions: AlpacaEodPosition[], openRows: Re
       continue;
     }
     if (!row.pair_key) symbolsToClose.add(p.symbol);
-  }
-  for (const legs of pairGroups.values()) {
-    if (legs.length < 2) continue; // gamba già orfana per altra causa, non compito di questa funzione
-    let combined = 0;
-    let allPriced = true;
-    for (const leg of legs) {
-      const pos = positions.find((p) => p.symbol === leg.symbol);
-      if (!pos) {
-        allPriced = false;
-        break;
-      }
-      combined += Number(pos.unrealized_pl);
-    }
-    if (allPriced && combined > 0) for (const leg of legs) symbolsToClose.add(leg.symbol);
   }
 
   return positions.filter((p) => symbolsToClose.has(p.symbol));

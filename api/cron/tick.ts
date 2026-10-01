@@ -24,7 +24,6 @@ import {
   currentZ,
   decideEntries as decidePairsEntries,
   decideExits as decidePairsExits,
-  decidePairsEodCloses,
   pairKey,
   selectPairs,
   statsForPair,
@@ -484,11 +483,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // --- Rete di sicurezza EOD, a ridosso della chiusura ---
     // ORB/VWAP (posizioni singole, decideLabEodCloses): chiude sempre, in utile o in perdita
-    // (dal 22/9/2026, vedi server/labEod.ts per l'evidenza da backtest). Pairs
-    // (decidePairsEodCloses): resta la regola precedente, le due gambe si chiudono insieme
-    // solo se il P&L combinato è positivo, mai una gamba sola — altrimenti quella rimasta
-    // resta orfana e nessuna logica la riprende più in mano (bug trovato con un backtest su
-    // dati storici reali prima del primo giorno live).
+    // (dal 22/9/2026, vedi server/labEod.ts per l'evidenza da backtest). Pairs: dall'1/10/2026
+    // NON si chiudono mai per regola EOD, nemmeno se in utile combinato — escono solo per
+    // z-score (decidePairsExits: rientro o stop). Backtest su due finestre indipendenti di
+    // quasi 200 sedute ha mostrato che la vecchia regola "chiudi se in utile" sostituiva di
+    // fatto l'uscita vera della strategia con un incasso anticipato (168 chiusure su 189 erano
+    // l'EOD opportunistico, solo 2 il vero rientro) — rimuovendola il pairs migliora su
+    // entrambe le finestre, a differenza di ORB/VWAP dove la stessa idea è un classico
+    // miglioramento che sparisce fuori campione. Vedi CLAUDE.md "Backtest approfondito,
+    // 1/10/2026". decidePairsEodCloses resta definita in server/pairsTrading.ts per
+    // riferimento, non più chiamata qui.
     let eodClosedCount = 0;
     if (nearClose) {
       const stillOpenIds = new Set([...vwapExits, ...orbExits].map((e) => e.position.id));
@@ -503,24 +507,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         await db()`UPDATE lab_positions SET status='closed', exit_price=${c.exitPrice}, exit_time=${now.toISOString()}, realized_pnl=${c.realizedPnl}, exit_reason='eod' WHERE id=${c.id}`;
       }
 
-      const pairLegRows: OpenLeg[] = remainingRows
-        .filter((r) => r.pair_key)
-        .map((r) => ({ id: r.id, pairKey: r.pair_key!, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price }));
-      const pairEodCloses = decidePairsEodCloses(pairLegRows, prices);
-      let pairLegsClosed = 0;
-      for (const pc of pairEodCloses) {
-        for (const legId of pc.legIds) {
-          const leg = pairLegRows.find((l) => l.id === legId);
-          const price = leg ? prices[leg.symbol] : undefined;
-          if (!leg || price == null) continue;
-          const dir = leg.side === "LONG" ? 1 : -1;
-          const legPnl = Math.round(leg.qty * (price - leg.entryPrice) * dir);
-          await db()`UPDATE lab_positions SET status='closed', exit_price=${price}, exit_time=${now.toISOString()}, realized_pnl=${legPnl}, exit_reason='eod' WHERE id=${legId}`;
-          pairLegsClosed++;
-        }
-      }
-
-      eodClosedCount = singleCloses.length + pairLegsClosed;
+      eodClosedCount = singleCloses.length;
     }
 
     // --- Chiusura EOD reale (conto Alpaca), a ridosso della chiusura — percorso primario dal

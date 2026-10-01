@@ -229,6 +229,14 @@ export interface PairEodClose {
  * momento decideExits sopra si rifiuta di valutarla ("gamba orfana: non si tocca alla
  * cieca"), quindi resterebbe aperta indefinitamente, gestita da nessuna logica. Trovato
  * con un backtest su dati storici reali prima del primo giorno live.
+ *
+ * NON PIÙ CHIAMATA IN PRODUZIONE dall'1/10/2026 (né da api/cron/tick.ts né da
+ * server/realEod.ts) — un backtest su due finestre indipendenti di quasi 200 sedute ha
+ * mostrato che questa regola ("chiudi se in utile combinato") sostituiva di fatto l'uscita
+ * vera della strategia (decideExits, z-score) con un incasso anticipato: 168 chiusure su 189
+ * erano questa funzione, solo 2 il vero rientro. Rimuovendo la chiusura EOD il pairs migliora
+ * su entrambe le finestre — vedi CLAUDE.md "Regola EOD dei pairs rimossa, 1/10/2026". Funzione
+ * tenuta per riferimento/test futuri (scripts/backtest.ts, EXP_EOD_MODE="pairs-if-profit").
  */
 export function decidePairsEodCloses(openLegs: OpenLeg[], prices: Record<string, number>): PairEodClose[] {
   const byPair = new Map<string, OpenLeg[]>();
