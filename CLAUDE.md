@@ -55,6 +55,23 @@ Non validato con un backtest A/B (a differenza di ogni altra decisione sopra) �
 Aggiunto un terzo criterio a `computeEligibility` (`server/strategyAllocation.ts`): `MIN_RECENT_AVG_NET = 0` su `RECENT_AVG_LOOKBACK_SESSIONS = 5` sedute lab, indipendente dalla finestra di 20 sedute del drawdown. Applicato oggi: ORB media ultime 5 sedute −281$ (esclusa), VWAP +12$ e pairs +16$ (ammesse) → **capitale reale ripartito 50/50 tra pairs e VWAP, ORB a peso zero**. Stessa logica di "aumentare il peso di pairs": non forzare il pairs a tradare di più (verificato che non è un problema di `MAX_PAIRS` — il massimo di coppie aperte contemporaneamente in 18 giorni è stato 3 su 10 slot disponibili, il collo di bottiglia è la rarità del segnale |z|≥2,0 calcolato contro la media storica di lungo periodo, non la capacità), ma dargli una quota di capitale più alta escludendo il peggiore.
 
 **Stessa onestà dell'allocazione ripartita del 25/9**: soglia scelta guardando i dati di oggi (ORB −351$/5 giorni, VWAP +129$, pairs +4$ nella stima iniziale a mano; i numeri esatti di `computeEligibility` differiscono leggermente per il confine esatto delle date ma la separazione è la stessa), non validata su una finestra storica indipendente — rischio dichiarato di averla tarata sul risultato desiderato. ORB resta comunque nel lab per continuare a essere osservato; rientrerebbe nell'allocazione reale automaticamente se la sua media mobile tornasse sopra zero.
+
+**Backtest approfondito, 1/10/2026 — quasi 200 sedute su due finestre indipendenti, la base dati più ampia usata finora (le altre erano 39+39).** Scoperto che i dati intraday Alpaca risalgono almeno a novembre 2025 (ben oltre le finestre usate finora); `fetchTradingDays` in `scripts/backtest.ts` ha un buffer di calendario (`count + 15` giorni) tarato per finestre da ~39 sedute, insufficiente per richieste più grandi — con una richiesta di 130 sedute restituisce comunque tutte quelle disponibili nel buffer effettivo (~98-99), non un errore. Due finestre quasi non sovrapposte testate: 11/5-1/10/2026 (99 sedute) e 17/12/2025-11/5/2026 (98 sedute), parametri di produzione attuali (ORB volume 2,5×, VWAP max hold 90 min, invariati rispetto alle voci sopra).
+
+Risultato per strategia (conferma, su un campione molto più grande, le conclusioni già prese):
+- **ORB**: −2.824 (finestra recente) / **−7.522** (fuori campione) — negativo su entrambe, in modo netto. Su 1.717 uscite totali in tutta la storia testata, solo il 4,4% sono target raggiunti, 42% stop, il resto chiusure EOD — non rumore recente, uno squilibrio strutturale vinte/perse confermato sul campione più ampio possibile. Nessuna decima correzione proposta dopo le nove già tentate (vedi sopra): il problema non sembra un parametro, l'esclusione dal capitale reale (29/9) è ampiamente confermata.
+- **VWAP**: +4.009 / **+4.309** — positivo su entrambe, valori quasi identici: la conferma più forte finora che il fix del 24/9 (durata massima 90 min) sia un miglioramento reale, non un caso.
+- **Pairs**: +1.898 / +2.401 — positivo su entrambe, coerente con tutta la storia precedente.
+
+**Rivisitata la domanda "ha senso chiudere sempre tutte le posizioni ogni giorno?" con tre modalità** (`EXP_EOD_MODE` in `scripts/backtest.ts`: `current` = produzione, singole sempre/pairs solo se in utile combinato; `always` = forza la chiusura anche dei pairs; `never` = nessuna rete di sicurezza EOD, le posizioni escono solo per le loro regole normali) sulle stesse due finestre:
+
+| Modalità | Recente | Fuori campione |
+|---|---|---|
+| **current (produzione)** | +3.083 | −812 |
+| always | +1.023 | −2.609 |
+| **never** | **+9.032** | **−7.860** |
+
+`never` sembrava clamorosamente la scelta migliore nella finestra recente (quasi 3× il risultato attuale) ed è la **peggiore** delle tre fuori campione — lo stesso identico pattern di overfitting visto 9 volte su ORB e 3 volte sulle strategie costruite da zero, stavolta sulla regola EOD stessa invece che su un parametro di segnale. **`current` resta l'unica modalità mai la peggiore delle tre in nessuna finestra — nessuna modifica alla regola EOD.** Script di supporto tenuto: `scripts/deep-review-1-10.mjs` (orchestratore delle due finestre × tre modalità), non attivo in produzione.
 ### Le tre strategie: come funzionano
 
 - **VWAP reversion (LAB C)**, `server/vwapReversion.ts`: per ogni titolo senza posizione, distanza % dal VWAP di giornata e RSI(14) su barre a 5 min. Entra se `|distanza| ≥ 1,2%` e RSI conferma esaurimento (>70 sopra il VWAP → SHORT, <30 sotto → LONG); i più estesi riempiono gli slot liberi (max 8). Esce su rientro al VWAP, stop −0,6%, o 90 min in posizione (era 45 min, vedi "Due parametri corretti" sotto).

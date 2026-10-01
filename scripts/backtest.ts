@@ -151,6 +151,16 @@ if (EXP_ORB_RANGE_MINUTES != null) console.log(`ORB: range di apertura override=
 if (EXP_ORB_VOLUME_MULT != null) console.log(`ORB: soglia volume override=${EXP_ORB_VOLUME_MULT}× (produzione: 1.8×)`);
 if (EXP_VWAP_MAX_HOLD_MIN != null) console.log(`VWAP: max hold override=${EXP_VWAP_MAX_HOLD_MIN} min (produzione: 45)`);
 if (EXP_VWAP_EXTENSION_PCT != null) console.log(`VWAP: soglia estensione override=${EXP_VWAP_EXTENSION_PCT}% (produzione: 1.2%)`);
+
+// Variante sulla regola EOD stessa, valutata il 1/10/2026 su uno storico molto più lungo (fino
+// a ~6 mesi, non più 39+39 giorni) per ridiscutere "ha senso chiudere sempre tutto ogni
+// giorno". "current" (default) = produzione: singole sempre (decideLabEodCloses, già
+// incondizionato), pairs solo se in utile combinato (decidePairsEodCloses). "always" forza la
+// chiusura anche dei pairs, a prescindere dal P&L combinato. "never" disattiva la rete di
+// sicurezza EOD per entrambi: le posizioni escono solo per le loro regole normali (stop/
+// target/tempo/z-score), possono restare aperte durante la notte indefinitamente.
+const EXP_EOD_MODE = (process.env.EXP_EOD_MODE as "current" | "always" | "never" | undefined) ?? "current";
+if (EXP_EOD_MODE !== "current") console.log(`EOD: modalità override = "${EXP_EOD_MODE}" (produzione: "current")`);
 const dailyNet: Record<"orb" | "vwap" | "pairs", number[]> = { orb: [], vwap: [], pairs: [] };
 
 interface AlpacaIntradayBarRaw {
@@ -553,10 +563,12 @@ async function run() {
       ...vwapOpen.map((p) => ({ id: p.id, symbol: p.symbol, side: p.side, qty: p.qty, entryPrice: p.entryPrice })),
     ];
     let singleCloses: ReturnType<typeof decideLabEodCloses> = [];
-    try {
-      singleCloses = decideLabEodCloses(singleRows, lastPrices);
-    } catch (e) {
-      flag(`[${day}] eccezione in decideLabEodCloses: ${(e as Error).message}`);
+    if (EXP_EOD_MODE !== "never") {
+      try {
+        singleCloses = decideLabEodCloses(singleRows, lastPrices);
+      } catch (e) {
+        flag(`[${day}] eccezione in decideLabEodCloses: ${(e as Error).message}`);
+      }
     }
     for (const c of singleCloses) {
       const strat = strategyOf.get(c.id);
@@ -572,11 +584,29 @@ async function run() {
     }
 
     let pairEodCloses: ReturnType<typeof decidePairsEodCloses> = [];
-    try {
-      pairEodCloses = decidePairsEodCloses(pairsOpen, lastPrices);
-    } catch (e) {
-      flag(`[${day}] eccezione in decidePairsEodCloses: ${(e as Error).message}`);
+    if (EXP_EOD_MODE === "current") {
+      try {
+        pairEodCloses = decidePairsEodCloses(pairsOpen, lastPrices);
+      } catch (e) {
+        flag(`[${day}] eccezione in decidePairsEodCloses: ${(e as Error).message}`);
+      }
+    } else if (EXP_EOD_MODE === "always") {
+      // Forza la chiusura di ogni coppia completa (entrambe le gambe presenti), a prescindere
+      // dal P&L combinato — stessa logica di decidePairsEodCloses ma senza il filtro "solo se
+      // in utile".
+      const byPair = new Map<string, typeof pairsOpen>();
+      for (const leg of pairsOpen) {
+        if (!byPair.has(leg.pairKey)) byPair.set(leg.pairKey, []);
+        byPair.get(leg.pairKey)!.push(leg);
+      }
+      for (const [pairKeyVal, legs] of byPair) {
+        if (legs.length < 2) continue;
+        if (legs.every((l) => lastPrices[l.symbol] != null)) {
+          pairEodCloses.push({ pairKey: pairKeyVal, legIds: legs.map((l) => l.id) });
+        }
+      }
     }
+    // EXP_EOD_MODE === "never": pairEodCloses resta [], nessuna chiusura forzata.
     const pairEodLegIds = new Set<number>();
     for (const pc of pairEodCloses) {
       for (const legId of pc.legIds) {

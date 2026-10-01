@@ -15,6 +15,15 @@
 // richiedere più di una seduta — e quasi raddoppia gli ingressi (uscita anticipata → slot
 // libero → nuovo ingresso il giorno dopo), motivo per cui restano sulla regola "solo se in
 // utile combinato" (decidePairsEodCloses).
+//
+// Riconfermato il 1/10/2026 su un campione molto più ampio (quasi 200 sedute, due finestre
+// quasi non sovrapposte, non più 39+39) con una terza modalità in più (EXP_EOD_MODE in
+// scripts/backtest.ts: "never", nessuna rete di sicurezza EOD per nessuna strategia) — "never"
+// sembrava clamorosamente la scelta migliore sulla finestra recente (+9.032 contro +3.083
+// della regola attuale) ed è risultata la peggiore delle tre fuori campione (−7.860 contro
+// −812) — stesso pattern di overfitting di sempre, stavolta sulla regola EOD invece che su un
+// parametro di segnale. La regola attuale resta l'unica mai la peggiore delle tre in nessuna
+// finestra. Vedi CLAUDE.md "Backtest approfondito, 1/10/2026".
 export type Side = "LONG" | "SHORT";
 
 export interface LabOpenRow {
