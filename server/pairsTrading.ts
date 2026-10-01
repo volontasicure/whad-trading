@@ -2,11 +2,15 @@
 // Coppie cointegrate dello stesso settore: compra il titolo debole e vende quello forte
 // quando lo spread supera 2σ, chiude sul rientro alla media. Parametri da src/data/mockData.ts.
 //
-// Semplificazione dichiarata: un vero test di cointegrazione (Engle-Granger / ADF) è
-// complesso da implementare e verificare correttamente. Qui la selezione delle coppie usa
-// la correlazione dei rendimenti giornalieri tra titoli dello stesso settore come proxy —
-// non è cointegrazione statistica vera, ma è trasparente, deterministica e ricalcolata
-// ogni giorno come richiesto dalla spec.
+// Semplificazione dichiarata: la selezione delle coppie usa principalmente la correlazione dei
+// rendimenti giornalieri tra titoli dello stesso settore come proxy della cointegrazione — non
+// cointegrazione statistica vera, ma trasparente, deterministica e ricalcolata ogni giorno come
+// richiesto dalla spec. Dall'1/10/2026 è disponibile anche un vero test di cointegrazione
+// (Engle-Granger + ADF, server/cointegration.ts, `cointTStat` su ogni PairStats) come filtro
+// opzionale, non ancora attivo in produzione — vedi `selectPairs` sotto e CLAUDE.md ("Due
+// coppie pairs strutturalmente non mean-reverting").
+
+import { cointegrationTStat } from "./cointegration.js";
 
 export const STRATEGY_ID = "pairs";
 export const MAX_PAIRS = 10;
@@ -14,6 +18,10 @@ export const CAPITAL = 100_000;
 export const ENTRY_Z = 2.0;
 export const EXIT_Z = 0.3;
 export const STOP_Z = 3.5;
+/** Finestra (sedute) del test di cointegrazione Engle-Granger — più corta del lookback di
+ * correlazione/z-score (tutto lo storico disponibile) per restare sensibile a una rottura
+ * recente, vedi server/cointegration.ts. */
+export const COINT_WINDOW = 60;
 
 export type Side = "LONG" | "SHORT";
 
@@ -67,6 +75,11 @@ export interface PairStats {
   correlation: number;
   meanRatio: number;
   stdRatio: number;
+  /** t-statistic del test di cointegrazione Engle-Granger (server/cointegration.ts) sulle
+   * ultime COINT_WINDOW sedute, più negativa = più evidenza di stazionarietà. null se lo
+   * storico disponibile è più corto di COINT_WINDOW. Diagnostico sempre calcolato; usato come
+   * filtro solo se `selectPairs` riceve `maxCointTStat`. */
+  cointTStat: number | null;
 }
 
 function dailyLogReturns(closes: number[]): number[] {
@@ -121,7 +134,8 @@ export function statsForPair(a: string, b: string, closesBySymbolAscending: Reco
   const closesB = closesBySymbolAscending[b];
   if (!closesA || !closesB || closesA.length === 0 || closesB.length === 0) return null;
   const corr = correlation(dailyLogReturns(closesA), dailyLogReturns(closesB));
-  return { a, b, correlation: corr, ...ratioStats(closesA, closesB) };
+  const cointTStat = cointegrationTStat(closesA, closesB, COINT_WINDOW);
+  return { a, b, correlation: corr, cointTStat, ...ratioStats(closesA, closesB) };
 }
 
 /**
@@ -134,8 +148,19 @@ export function statsForPair(a: string, b: string, closesBySymbolAscending: Reco
  * davvero indipendenti se condividono JPM, un movimento su JPM muove entrambe insieme).
  * Validato il 18/9/2026 via backtest A/B su due finestre storiche: migliora il P&L su
  * entrambe (254→655 sul periodo recente, 1508→1566 fuori campione).
+ *
+ * `options.maxCointTStat`, se impostato, scarta dai candidati (prima della selezione greedy,
+ * così un candidato respinto non blocca i suoi titoli per il prossimo migliore) le coppie il
+ * cui test di cointegrazione Engle-Granger (server/cointegration.ts) non supera la soglia
+ * indicata — cioè `cointTStat` null o >= soglia (meno negativo = meno evidenza di
+ * stazionarietà). Non attivo di default (comportamento identico a prima se omesso) — in fase
+ * di validazione su backtest, vedi CLAUDE.md "Due coppie pairs strutturalmente non
+ * mean-reverting".
  */
-export function selectPairs(closesBySymbolAscending: Record<string, number[]>): PairStats[] {
+export function selectPairs(
+  closesBySymbolAscending: Record<string, number[]>,
+  options?: { maxCointTStat?: number }
+): PairStats[] {
   const bySector = new Map<string, string[]>();
   for (const [symbol, sector] of Object.entries(SECTORS)) {
     const closes = closesBySymbolAscending[symbol];
@@ -144,7 +169,7 @@ export function selectPairs(closesBySymbolAscending: Record<string, number[]>): 
     bySector.get(sector)!.push(symbol);
   }
 
-  const candidates: { a: string; b: string; correlation: number }[] = [];
+  const candidates: { a: string; b: string; correlation: number; cointTStat: number | null }[] = [];
   for (const symbols of bySector.values()) {
     for (let i = 0; i < symbols.length; i++) {
       for (let j = i + 1; j < symbols.length; j++) {
@@ -154,16 +179,22 @@ export function selectPairs(closesBySymbolAscending: Record<string, number[]>): 
           dailyLogReturns(closesBySymbolAscending[a]),
           dailyLogReturns(closesBySymbolAscending[b])
         );
-        candidates.push({ a, b, correlation: corr });
+        const cointTStat = cointegrationTStat(closesBySymbolAscending[a], closesBySymbolAscending[b], COINT_WINDOW);
+        candidates.push({ a, b, correlation: corr, cointTStat });
       }
     }
   }
 
-  candidates.sort((x, y) => y.correlation - x.correlation);
+  const eligible =
+    options?.maxCointTStat == null
+      ? candidates
+      : candidates.filter((c) => c.cointTStat != null && c.cointTStat < options.maxCointTStat!);
+
+  eligible.sort((x, y) => y.correlation - x.correlation);
 
   const usedSymbols = new Set<string>();
-  const chosen: typeof candidates = [];
-  for (const c of candidates) {
+  const chosen: typeof eligible = [];
+  for (const c of eligible) {
     if (usedSymbols.has(c.a) || usedSymbols.has(c.b)) continue;
     chosen.push(c);
     usedSymbols.add(c.a);
@@ -171,10 +202,11 @@ export function selectPairs(closesBySymbolAscending: Record<string, number[]>): 
     if (chosen.length >= MAX_PAIRS) break;
   }
 
-  return chosen.map(({ a, b, correlation: corr }) => ({
+  return chosen.map(({ a, b, correlation: corr, cointTStat }) => ({
     a,
     b,
     correlation: corr,
+    cointTStat,
     ...ratioStats(closesBySymbolAscending[a], closesBySymbolAscending[b]),
   }));
 }
