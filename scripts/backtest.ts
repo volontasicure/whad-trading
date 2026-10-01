@@ -40,6 +40,7 @@ import {
 import { computeSMA, computeTrendEfficiency } from "../server/technicalIndicators.js";
 import {
   MAX_PAIRS,
+  currentZ,
   decideEntries as decidePairsEntries,
   decideExits as decidePairsExits,
   decidePairsEodCloses,
@@ -94,6 +95,42 @@ const EXP_ORB_STOP_MULT = process.env.EXP_ORB_STOP_MULT ? Number(process.env.EXP
 const EXP_PAIRS_DELAY_MIN = process.env.EXP_PAIRS_DELAY_MIN ? Number(process.env.EXP_PAIRS_DELAY_MIN) : 0;
 if (EXP_ORB_STOP_MULT != null) console.log(`EXP_ORB_STOP_MULT=${EXP_ORB_STOP_MULT}`);
 if (EXP_PAIRS_DELAY_MIN > 0) console.log(`EXP_PAIRS_DELAY_MIN=${EXP_PAIRS_DELAY_MIN}`);
+
+// EXP_PAIRS_MAX_HOLD_DAYS=N chiude forzatamente una coppia (entrambe le gambe, a prescindere
+// dal P&L) se resta aperta da almeno N sedute senza che lo z-score sia mai rientrato — ipotesi
+// di sicurezza analoga al fix MAX_HOLD_MINUTES di VWAP (24/9/2026). Nata dalla scoperta
+// dell'1/10/2026: JPM/BAC e KO/PEP sono rimaste con |z| sopra la soglia di rientro per
+// settimane (0 rientri su 327 letture negli ultimi 5 giorni per entrambe), mai raggiungendo
+// lo stop (3,5) né il target (0,3) — senza più una rete EOD (rimossa l'1/10), questo tipo di
+// posizione oggi può restare aperta indefinitamente. 0/non impostato = nessun limite (comportamento attuale).
+const EXP_PAIRS_MAX_HOLD_DAYS = process.env.EXP_PAIRS_MAX_HOLD_DAYS ? Number(process.env.EXP_PAIRS_MAX_HOLD_DAYS) : 0;
+if (EXP_PAIRS_MAX_HOLD_DAYS > 0) console.log(`EXP_PAIRS_MAX_HOLD_DAYS=${EXP_PAIRS_MAX_HOLD_DAYS}`);
+// SCARTATA l'1/10/2026: peggiora il P&L pairs su ENTRAMBE le finestre a ogni valore testato
+// (3/5/7 giorni) rispetto al baseline senza limite (+2.376/+2.725) — 685/1.516, 628/502,
+// 85/1.701. Non overfitting (buono su una, cattivo sull'altra): rigetto netto su entrambe a
+// ogni valore. Tagliare per durata chiude anche le coppie sane prima della reversione completa
+// (ingressi quasi triplicati, 198 vs 86 — continuo rientra-esci forzato), cancellando più
+// valore di quanto ne salvi sulle coppie bloccate. Codice tenuto solo come memoria, non
+// riprovare senza nuove prove.
+
+// EXP_PAIRS_STALENESS_DAYS=N esclude una coppia dai NUOVI ingressi (le posizioni già aperte
+// non sono toccate) se il suo |z| non si è mai avvicinato al rientro (<= EXP_PAIRS_STALENESS_PROXIMITY)
+// in nessuna delle ultime N sedute — più chirurgico di EXP_PAIRS_MAX_HOLD_DAYS sopra (scartata):
+// non forza la chiusura delle coppie sane, blocca solo l'ingresso in coppie la cui
+// cointegrazione sembra già rotta (JPM/BAC, KO/PEP: 0 avvicinamenti su 327 letture in 5 giorni,
+// vedi scoperta dell'1/10/2026). 0/non impostato = nessun filtro (comportamento attuale).
+const EXP_PAIRS_STALENESS_DAYS = process.env.EXP_PAIRS_STALENESS_DAYS ? Number(process.env.EXP_PAIRS_STALENESS_DAYS) : 0;
+const EXP_PAIRS_STALENESS_PROXIMITY = process.env.EXP_PAIRS_STALENESS_PROXIMITY ? Number(process.env.EXP_PAIRS_STALENESS_PROXIMITY) : 1.0;
+if (EXP_PAIRS_STALENESS_DAYS > 0) console.log(`EXP_PAIRS_STALENESS_DAYS=${EXP_PAIRS_STALENESS_DAYS} (prossimità=${EXP_PAIRS_STALENESS_PROXIMITY})`);
+// SCARTATA l'1/10/2026, stesso giorno della precedente: peggiora il P&L pairs su ENTRAMBE le
+// finestre a ogni valore testato (3/5/7 giorni, prossimità 1.0) rispetto al baseline
+// (+2.376/+2.725) — -40/806, 342/1.589, 673/1.595. Peggioramento monotono (più stringente il
+// filtro, peggio) — anche un'esclusione mirata alle sole JPM/BAC e KO/PEP finisce per bloccare
+// altre coppie sane che impiegano solo più tempo del normale a convergere; il mancato guadagno
+// su quelle supera il danno evitato sulle due coppie davvero bloccate. Codice tenuto solo come
+// memoria, non riprovare senza nuove prove (es. una soglia di prossimità diversa potrebbe in
+// teoria cambiare il risultato, ma il pattern monotono osservato rende improbabile che una
+// variante di questa stessa idea batta il baseline).
 
 // Varianti VWAP da valutare dopo la seduta del 21/9/2026 (META shortata 6 volte, 5 uscite in perdita,
 // stesso schema di BA il 16/9). Nessuna è attiva in produzione:
@@ -295,8 +332,12 @@ async function run() {
   let vwapOpen: SimVwapPos[] = [];
   let pairsOpen: SimPairLeg[] = [];
   const strategyOf = new Map<number, "orb" | "vwap" | "pairs">();
+  const pairEntryDayIndex = new Map<number, number>(); // id gamba -> indice (0-based) della seduta di apertura, per EXP_PAIRS_MAX_HOLD_DAYS
+  const pairStaleHistory = new Map<string, boolean[]>(); // pairKey -> storico "si è avvicinata al rientro oggi?", per EXP_PAIRS_STALENESS_DAYS
 
+  let dayIndex = -1;
   for (const day of tradingDays) {
+    dayIndex++;
     const realizedBefore = { orb: totals.orb.realized, vwap: totals.vwap.realized, pairs: totals.pairs.realized };
     const session = await fetchMarketSession(day);
     if (!session) {
@@ -357,6 +398,7 @@ async function run() {
     let dayCounters = { orbEntries: 0, orbExits: 0, vwapEntries: 0, vwapExits: 0, pairsEntries: 0, pairsExits: 0, vwapPnl: 0 };
     const closeMs = new Date(session.closeUtc).getTime();
     const stoppedPairsToday = new Set<string>(); // raffreddamento post-stop, azzerato a ogni giorno
+    const pairMinAbsZToday = new Map<string, number>(); // per EXP_PAIRS_STALENESS_DAYS, azzerato a ogni giorno
 
     for (const timeIso of times) {
       const now = new Date(timeIso);
@@ -412,6 +454,19 @@ async function run() {
         pairsExits = decidePairsExits(pairsOpen, prices, pairStatsByKey);
       } catch (e) {
         flag(`[${day} ${timeIso}] eccezione in decidePairsExits: ${(e as Error).message}`);
+      }
+
+      if (EXP_PAIRS_STALENESS_DAYS > 0) {
+        for (const stats of pairStats) {
+          const priceA = prices[stats.a];
+          const priceB = prices[stats.b];
+          if (priceA == null || priceB == null) continue;
+          const z = currentZ(priceA, priceB, stats);
+          if (z == null) continue;
+          const key = pairKey(stats.a, stats.b);
+          const prevMin = pairMinAbsZToday.get(key) ?? Infinity;
+          pairMinAbsZToday.set(key, Math.min(prevMin, Math.abs(z)));
+        }
       }
 
       for (const ex of vwapExits) {
@@ -521,7 +576,16 @@ async function run() {
         }
 
         const pairsStillOpenKeys = new Set(pairsOpen.map((l) => l.pairKey));
-        const pairsExcludedKeys = new Set([...pairsStillOpenKeys, ...stoppedPairsToday]);
+        const stalePairKeys = new Set<string>();
+        if (EXP_PAIRS_STALENESS_DAYS > 0) {
+          for (const stats of pairStats) {
+            const key = pairKey(stats.a, stats.b);
+            const hist = pairStaleHistory.get(key);
+            if (!hist || hist.length < EXP_PAIRS_STALENESS_DAYS) continue;
+            if (hist.slice(-EXP_PAIRS_STALENESS_DAYS).every((touched) => !touched)) stalePairKeys.add(key);
+          }
+        }
+        const pairsExcludedKeys = new Set([...pairsStillOpenKeys, ...stoppedPairsToday, ...stalePairKeys]);
         let pairsEntries: ReturnType<typeof decidePairsEntries> = [];
         try {
           const minutesFromOpen = (now.getTime() - openMs) / 60_000;
@@ -536,6 +600,7 @@ async function run() {
             const id = nextId++;
             pairsOpen.push({ id, pairKey: e.pairKey, symbol: leg.symbol, side: leg.side, qty: leg.qty, entryPrice: leg.entryPrice });
             strategyOf.set(id, "pairs");
+            pairEntryDayIndex.set(id, dayIndex);
           }
           totals.pairs.entries += e.legs.length;
           dayCounters.pairsEntries += e.legs.length;
@@ -552,6 +617,15 @@ async function run() {
       for (const p of [...orbOpen, ...vwapOpen, ...pairsOpen]) {
         if (!Number.isFinite(p.qty) || p.qty <= 0) flag(`[${day} ${timeIso}] qty non valida per ${p.symbol}: ${p.qty}`);
         if (!Number.isFinite(p.entryPrice) || p.entryPrice <= 0) flag(`[${day} ${timeIso}] entryPrice non valido per ${p.symbol}: ${p.entryPrice}`);
+      }
+    }
+
+    if (EXP_PAIRS_STALENESS_DAYS > 0) {
+      for (const stats of pairStats) {
+        const key = pairKey(stats.a, stats.b);
+        const minAbsZ = pairMinAbsZToday.get(key) ?? Infinity;
+        if (!pairStaleHistory.has(key)) pairStaleHistory.set(key, []);
+        pairStaleHistory.get(key)!.push(minAbsZ <= EXP_PAIRS_STALENESS_PROXIMITY);
       }
     }
 
@@ -626,6 +700,31 @@ async function run() {
         totals.pairs.exits++;
         totals.pairs.exitReasons["eod_safety_net"] = (totals.pairs.exitReasons["eod_safety_net"] ?? 0) + 1;
         strategyOf.delete(legId);
+      }
+    }
+
+    if (EXP_PAIRS_MAX_HOLD_DAYS > 0) {
+      const byPair = new Map<string, typeof pairsOpen>();
+      for (const leg of pairsOpen) {
+        if (pairEodLegIds.has(leg.id)) continue; // già chiusa sopra (eod/stop/target nello stesso giorno)
+        if (!byPair.has(leg.pairKey)) byPair.set(leg.pairKey, []);
+        byPair.get(leg.pairKey)!.push(leg);
+      }
+      for (const [pk, legs] of byPair) {
+        if (legs.length < 2) continue;
+        const oldestEntryDay = Math.min(...legs.map((l) => pairEntryDayIndex.get(l.id) ?? dayIndex));
+        const daysHeld = dayIndex - oldestEntryDay + 1; // seduta di apertura stessa conta come 1
+        if (daysHeld < EXP_PAIRS_MAX_HOLD_DAYS) continue;
+        if (!legs.every((l) => lastPrices[l.symbol] != null)) continue;
+        for (const leg of legs) {
+          pairEodLegIds.add(leg.id);
+          const price = lastPrices[leg.symbol];
+          const dir = leg.side === "LONG" ? 1 : -1;
+          totals.pairs.realized += Math.round(leg.qty * (price - leg.entryPrice) * dir);
+          totals.pairs.exits++;
+          totals.pairs.exitReasons["max_hold_days"] = (totals.pairs.exitReasons["max_hold_days"] ?? 0) + 1;
+          strategyOf.delete(leg.id);
+        }
       }
     }
 
