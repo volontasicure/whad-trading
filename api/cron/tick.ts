@@ -526,7 +526,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         } catch (err) {
           sessionResult = { skipped: true, reason: `errore: ${(err as Error).message}` };
         }
-        realEodNote = ` · EOD reale: ${closeResult.closed} chiuse/${closeResult.failed} fallite${closeResult.errors.length > 0 ? ` (${closeResult.errors.join("; ")})` : ""}, sessions: ${sessionResult.skipped ? `saltata (${sessionResult.reason})` : "ok"}`;
+        realEodNote = closeResult.skippedByLock
+          ? ` · EOD reale: saltata (lock, chiamata troppo ravvicinata), sessions: ${sessionResult.skipped ? `saltata (${sessionResult.reason})` : "ok"}`
+          : ` · EOD reale: ${closeResult.closed} chiuse/${closeResult.failed} fallite${closeResult.errors.length > 0 ? ` (${closeResult.errors.join("; ")})` : ""}, sessions: ${sessionResult.skipped ? `saltata (${sessionResult.reason})` : "ok"}`;
       } catch (err) {
         realEodNote = ` · EOD reale: errore (${(err as Error).message})`;
       }

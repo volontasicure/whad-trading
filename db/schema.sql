@@ -164,3 +164,17 @@ CREATE TABLE IF NOT EXISTS real_positions (
 
 CREATE INDEX IF NOT EXISTS real_positions_strategy_status_idx ON real_positions (strategy_id, status);
 CREATE INDEX IF NOT EXISTS real_positions_pair_key_idx ON real_positions (pair_key) WHERE pair_key IS NOT NULL;
+
+-- Lock a riga singola per evitare esecuzioni ravvicinate di runRealEodClose (server/realEod.ts).
+-- Trovato l'1/10/2026: il 30/9 due chiamate a pochi secondi di distanza (probabilmente due tick
+-- consecutivi entro la finestra nearClose di 20 minuti, in corsa sulla vista non ancora
+-- aggiornata delle posizioni Alpaca) hanno chiuso due volte la stessa posizione BA — 40 azioni
+-- vendute nella prima chiusura, altre 32 nella seconda prima che la prima si riflettesse,
+-- lasciando un corto da 32 azioni mai registrato in real_positions. UPDATE atomica con
+-- condizione sul tempo trascorso: la seconda chiamata ravvicinata non trova righe da
+-- aggiornare e si ferma, senza una finestra di corsa (TOCTOU) tra controllo e scrittura.
+CREATE TABLE IF NOT EXISTS eod_close_lock (
+  id BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+  last_run_at TIMESTAMPTZ
+);
+INSERT INTO eod_close_lock (id, last_run_at) VALUES (true, NULL) ON CONFLICT (id) DO NOTHING;

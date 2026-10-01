@@ -131,15 +131,50 @@ export interface RealEodCloseSummary {
   failed: number;
   errors: string[];
   symbols: string[];
+  /** Vero se questa chiamata si è fermata subito perché un'altra era appena passata (vedi EOD_CLOSE_LOCK_SECONDS sotto) — nessuna posizione valutata, non un errore. */
+  skippedByLock?: boolean;
+}
+
+/**
+ * Finestra minima tra due esecuzioni effettive di runRealEodClose. Trovato l'1/10/2026: il
+ * 30/9 due chiamate a 2,6 secondi di distanza (probabilmente due tick consecutivi entro la
+ * finestra nearClose di 20 minuti, in corsa sulla vista non ancora aggiornata delle posizioni
+ * Alpaca) hanno chiuso due volte la stessa posizione BA — 40 azioni vendute nella prima
+ * chiusura, altre 32 nella seconda prima che la prima si riflettesse su Alpaca, lasciando un
+ * corto da 32 azioni mai registrato in real_positions. 60 secondi è ben sotto la cadenza
+ * normale di 5 minuti tra un tick e l'altro (non blocca i tentativi legittimi nella stessa
+ * finestra di chiusura), ma esclude con margine qualunque corsa ravvicinata come quella vista.
+ */
+const EOD_CLOSE_LOCK_SECONDS = 60;
+
+/**
+ * Lock a riga singola (eod_close_lock, db/schema.sql): UPDATE atomica con condizione sul tempo
+ * trascorso, niente TOCTOU tra controllo e scrittura — la seconda chiamata ravvicinata non
+ * trova righe da aggiornare (0 rows), non "vede" un valore stale e poi scrive comunque.
+ */
+async function tryAcquireEodCloseLock(): Promise<boolean> {
+  const rows = (await db()`
+    UPDATE eod_close_lock SET last_run_at = now()
+    WHERE id = true AND (last_run_at IS NULL OR last_run_at < now() - make_interval(secs => ${EOD_CLOSE_LOCK_SECONDS}))
+    RETURNING last_run_at
+  `) as unknown as { last_run_at: string }[];
+  return rows.length > 0;
 }
 
 /**
  * Orchestratore: legge posizioni Alpaca + righe real_positions aperte, decide e chiude. Il
  * chiamante decide quando invocarla (vicino alla chiusura) — questa funzione non controlla da
  * sola l'orologio di mercato, per restare chiamabile sia da tick.ts (che lo controlla già per
- * conto suo, nearClose) sia da eod-close.ts (che ha il proprio controllo separato).
+ * conto suo, nearClose) sia da eod-close.ts (che ha il proprio controllo separato). Si ferma
+ * subito, senza valutare nulla, se un'altra chiamata è passata negli ultimi
+ * EOD_CLOSE_LOCK_SECONDS (vedi sopra) — protegge dall'esecuzione doppia ravvicinata.
  */
 export async function runRealEodClose(): Promise<RealEodCloseSummary> {
+  const acquired = await tryAcquireEodCloseLock();
+  if (!acquired) {
+    return { evaluated: 0, closed: 0, failed: 0, errors: [], symbols: [], skippedByLock: true };
+  }
+
   const positions = await alpacaFetch<AlpacaEodPosition[]>("/v2/positions");
   const openRows = (await db()`
     SELECT symbol, pair_key FROM real_positions WHERE status = 'open'
