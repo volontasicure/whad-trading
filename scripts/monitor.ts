@@ -24,15 +24,8 @@ import { fetchMarketSession } from "../server/marketHours.js";
 import { MAX_POSITIONS as ORB_MAX_POSITIONS, STRATEGY_ID as ORB_STRATEGY_ID } from "../server/orb.js";
 import { MAX_POSITIONS as VWAP_MAX_POSITIONS, STRATEGY_ID as VWAP_STRATEGY_ID } from "../server/vwapReversion.js";
 import { MAX_PAIRS, STRATEGY_ID as PAIRS_STRATEGY_ID } from "../server/pairsTrading.js";
-import { computeEligibility, computeWeights, LAB_CAPITAL_REF } from "../server/strategyAllocation.js";
-import {
-  computeDeviation,
-  findUnmatchedRealTrades,
-  reconcilePositions,
-  type RealClosedTrade,
-  type Side,
-  type TradeKey,
-} from "../server/realVsLab.js";
+import { runConsistencyChecks } from "../server/consistencyCheck.js";
+import { sendAlertEmail as sendAlertEmailShared } from "../server/alertEmail.js";
 
 function loadEnvLocal() {
   const p = path.resolve(process.cwd(), ".env.local");
@@ -79,15 +72,8 @@ function flag(summary: string, suggestion: string) {
 }
 const perfLines: string[] = [];
 
-const ALERT_EMAIL = "nicolaforria@gmail.com";
-
 /** Invio best-effort: un problema con l'email non deve far sparire la segnalazione (resta comunque nel log/exit code). */
 async function sendAlertEmail(perfSummary: string[]): Promise<void> {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    console.warn("RESEND_API_KEY mancante: salto l'invio email, l'anomalia resta comunque nel log di questa Action.");
-    return;
-  }
   const runUrl =
     process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
       ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
@@ -104,25 +90,9 @@ async function sendAlertEmail(perfSummary: string[]): Promise<void> {
   }
   if (runUrl) lines.push(`Log completo: ${runUrl}`);
 
-  try {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from: "WHAD Trading <onboarding@resend.dev>",
-        to: [ALERT_EMAIL],
-        subject: `⚠ WHAD Trading — ${anomalies.length} anomalia/e rilevata/e`,
-        text: lines.join("\n"),
-      }),
-    });
-    if (!res.ok) {
-      console.error(`Invio email fallito: Resend ha risposto ${res.status} ${await res.text().catch(() => "")}`);
-      return;
-    }
-    console.log(`Email di alert inviata a ${ALERT_EMAIL}.`);
-  } catch (err) {
-    console.error("Invio email fallito:", (err as Error).message);
-  }
+  const res = await sendAlertEmailShared(`⚠ WHAD Trading — ${anomalies.length} anomalia/e rilevata/e`, lines);
+  if (res.sent) console.log("Email di alert inviata.");
+  else console.error(`Email di alert NON inviata: ${res.reason}. L'anomalia resta comunque nel log di questa Action.`);
 }
 
 /**
@@ -189,123 +159,15 @@ async function printTodayPerformance(tradingDate: string): Promise<string[]> {
 }
 
 
-interface AlpacaPositionRow {
-  symbol: string;
-  qty: string;
-  side: "long" | "short";
-}
-
-interface AlpacaAccountRow {
-  equity: string;
-}
-
-const fmt = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(0)}$`;
-
 /**
- * Coerenza tra conto reale e laboratori (server/realVsLab.ts): riconciliazione broker ↔ DB,
- * trade reali senza gemello nel lab, scostamento di P&L realizzato oggi. Gira sia a mercato
- * aperto sia dopo la chiusura — dopo la chiusura è proprio il momento in cui si vede se
- * l'EOD ha davvero chiuso e registrato tutto.
+ * Coerenza tra conto reale e laboratori: la logica vive in server/consistencyCheck.ts, condivisa
+ * con il tick (che è il chiamante affidabile — gli schedule di GitHub girano 1-3 volte al giorno).
+ * Qui resta come controllo aggiuntivo, utile soprattutto a mercato chiuso, dove il tick non gira.
  */
 async function checkRealVsLab(tradingDate: string): Promise<string[]> {
-  const lines: string[] = [];
-
-  // --- 1. Riconciliazione broker ↔ real_positions ---
-  const [brokerRows, dbOpenRows] = await Promise.all([
-    alpacaFetch<AlpacaPositionRow[]>("/v2/positions"),
-    sql.query(
-      `SELECT symbol, side, qty::float8 AS qty FROM real_positions WHERE status = 'open'`
-    ) as unknown as Promise<{ symbol: string; side: Side; qty: number }[]>,
-  ]);
-  const broker = brokerRows.map((p) => {
-    const q = Math.abs(Number(p.qty));
-    return { symbol: p.symbol, signedQty: p.side === "short" ? -q : q };
-  });
-  const mismatches = reconcilePositions(broker, dbOpenRows);
-  for (const m of mismatches) {
-    flag(
-      `[REALE] ${m.symbol}: sul broker ${m.brokerQty} azioni, nel DB ${m.dbQty}`,
-      m.dbQty === 0
-        ? "Posizione presente su Alpaca ma non registrata in real_positions (stesso schema della doppia chiusura di BA del 30/9): nessuna regola la gestisce. Verifica gli ordini di oggi su quel simbolo e chiudila/registrala a mano."
-        : m.brokerQty === 0
-          ? "Il DB la considera aperta ma sul broker non c'è più: chiusura (bracket, EOD o manuale) non registrata. Recupera il fill da /v2/orders?status=closed e aggiorna real_positions, altrimenti il realized non viene contato."
-          : "Quantità diversa tra broker e DB: probabile fill parziale o doppio ordine. Controlla gli ordini di oggi su quel simbolo."
-    );
-  }
-  lines.push(`Riconciliazione broker↔DB: ${mismatches.length === 0 ? "OK" : `${mismatches.length} differenze`} (${broker.length} posizioni sul broker)`);
-
-  const session = await fetchMarketSession(tradingDate);
-  if (!session) return lines;
-
-  // --- 2. Trade reali chiusi oggi senza un gemello nel lab ---
-  const [realClosedRows, labTouchedRows] = await Promise.all([
-    sql.query(
-      `SELECT strategy_id, symbol, side, realized_pnl::float8 AS realized_pnl, exit_reason
-       FROM real_positions WHERE status = 'closed' AND exit_time >= $1`,
-      [session.openUtc]
-    ) as unknown as Promise<{ strategy_id: string; symbol: string; side: Side; realized_pnl: number; exit_reason: string | null }[]>,
-    sql.query(
-      `SELECT DISTINCT strategy_id, symbol, side FROM lab_positions
-       WHERE status = 'open' OR exit_time >= $1 OR entry_time >= $1`,
-      [session.openUtc]
-    ) as unknown as Promise<{ strategy_id: string; symbol: string; side: Side }[]>,
-  ]);
-  const realClosed: RealClosedTrade[] = realClosedRows.map((r) => ({
-    strategyId: r.strategy_id,
-    symbol: r.symbol,
-    side: r.side,
-    realizedPnl: r.realized_pnl ?? 0,
-    exitReason: r.exit_reason,
-  }));
-  const labTouched: TradeKey[] = labTouchedRows.map((r) => ({ strategyId: r.strategy_id, symbol: r.symbol, side: r.side }));
-  const unmatched = findUnmatchedRealTrades(realClosed, labTouched);
-  for (const t of unmatched) {
-    flag(
-      `[REALE] Trade ${t.strategyId} ${t.side} ${t.symbol} chiuso oggi (${fmt(t.realizedPnl)}, uscita: ${t.exitReason ?? "n/d"}) senza nessuna posizione corrispondente nel lab`,
-      "Il conto reale ha operato su qualcosa che la strategia nel lab non ha mai deciso: controlla in server/realExecution.ts come è nato l'ingresso (posizione ereditata da un giorno precedente? riconciliazione bracket? ordine duplicato?)."
-    );
-  }
-
-  // --- 3. Scostamento di P&L realizzato oggi, reale vs lab scalato ---
-  const [account, labRealizedRows, eligibility] = await Promise.all([
-    alpacaFetch<AlpacaAccountRow>("/v2/account"),
-    sql.query(
-      `SELECT strategy_id, coalesce(sum(realized_pnl), 0)::float8 AS pnl
-       FROM lab_positions WHERE status = 'closed' AND exit_time >= $1 GROUP BY strategy_id`,
-      [session.openUtc]
-    ) as unknown as Promise<{ strategy_id: string; pnl: number }[]>,
-    computeEligibility(tradingDate),
-  ]);
-  const weights = computeWeights(eligibility);
-  const labByStrategy = new Map(labRealizedRows.map((r) => [r.strategy_id, r.pnl]));
-  const realByStrategy = new Map<string, number>();
-  for (const t of realClosed) realByStrategy.set(t.strategyId, (realByStrategy.get(t.strategyId) ?? 0) + t.realizedPnl);
-
-  const strategyIds = [ORB_STRATEGY_ID, VWAP_STRATEGY_ID, PAIRS_STRATEGY_ID];
-  const deviation = computeDeviation(
-    strategyIds.map((id) => ({
-      strategyId: id,
-      labRealized: labByStrategy.get(id) ?? 0,
-      realRealized: realByStrategy.get(id) ?? 0,
-      weight: weights[id] ?? 0,
-    })),
-    Number(account.equity),
-    LAB_CAPITAL_REF
-  );
-  const detail = deviation.byStrategy
-    .filter((r) => Math.abs(r.expected) >= 1 || Math.abs(r.actual) >= 1)
-    .map((r) => `${STRATEGY_LABELS[r.strategyId]} atteso ${fmt(r.expected)} / reale ${fmt(r.actual)}`)
-    .join("; ");
-  const summary = `Reale vs lab, realizzato oggi: atteso ${fmt(deviation.expected)}, reale ${fmt(deviation.actual)}, scostamento ${fmt(deviation.gap)} (soglia ±${deviation.threshold.toFixed(0)}$)${detail ? ` — ${detail}` : ""}`;
-  lines.push(summary);
-  if (deviation.breached) {
-    flag(
-      `[REALE] ${summary}`,
-      "Il conto reale non sta replicando i lab ammessi oggi. Le cause viste finora sono tutte di esecuzione, non di strategia: size diversa dal previsto, ordini doppi, chiusure non registrate, posizioni ereditate da strategie a peso zero. Guarda prima le altre anomalie [REALE] di questa mail, poi tick_log e gli ordini Alpaca di oggi."
-    );
-  }
-
-  return lines;
+  const result = await runConsistencyChecks({ tradingDate });
+  for (const a of result.anomalies) flag(a.summary, a.suggestion);
+  return result.lines;
 }
 
 async function run() {
