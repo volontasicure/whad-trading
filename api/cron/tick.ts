@@ -7,6 +7,7 @@ import { fetchMarketSession } from "../../server/marketHours.js";
 import { saveDailyBars, saveSessionBars } from "../../server/barsStore.js";
 import { runRealExecution, type RealPositionRow } from "../../server/realExecution.js";
 import { runRealEodClose, finalizeTodaySession } from "../../server/realEod.js";
+import { runConsistencyIfDue } from "../../server/consistencyRunner.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
   STRATEGY_ID as ORB_STRATEGY_ID,
@@ -190,6 +191,7 @@ interface LabPositionRow {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const startedAtMs = Date.now();
   const auth = req.headers.authorization;
   if (!process.env.TICK_SECRET || auth !== `Bearer ${process.env.TICK_SECRET}`) {
     res.status(401).json({ error: "Non autorizzato" });
@@ -570,7 +572,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const note = `vwap: ${vwapExits.length} chiuse/${entriesSummary.vwap} aperte · orb: ${orbExits.length} chiuse/${entriesSummary.orb} aperte · pairs: ${pairsExits.length} chiuse/${entriesSummary.pairs} aperte${nearClose ? ` · EOD: ${eodClosedCount} chiuse` : ""}${realEodNote} · ${realNote}`;
     await db()`INSERT INTO tick_log (market_open, note) VALUES (true, ${note})`;
 
-    res.status(200).json({ marketOpen: true, nearClose, note, entriesSummary, eodClosedCount });
+    // --- Controllo di coerenza reale ↔ lab (dal 6/10/2026, server/consistencyRunner.ts). Dopo la
+    // scrittura di tick_log e dopo ogni ordine, quindi non può alterare l'esecuzione; può solo
+    // allungare la risposta, per questo non parte se il tick è già lento e ha un timeout proprio.
+    // Non lancia mai (errori e timeout tornano come nota), gira ogni ~10 minuti, non a ogni tick.
+    let consistencyNote = "controllo: non eseguito";
+    try {
+      consistencyNote = await runConsistencyIfDue({ now, tradingDate, sessionOpenUtc: session.openUtc, startedAtMs });
+    } catch (err) {
+      consistencyNote = `controllo: errore (${(err as Error).message})`;
+    }
+
+    res.status(200).json({ marketOpen: true, nearClose, note, consistency: consistencyNote, entriesSummary, eodClosedCount });
   } catch (err) {
     res.status(502).json({ error: (err as Error).message });
   }

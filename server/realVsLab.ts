@@ -137,3 +137,115 @@ export function computeDeviation(rows: StrategyRealizedToday[], realEquity: numb
   const threshold = Math.max(MIN_DEVIATION_DOLLARS, (realEquity * DEVIATION_PCT_OF_EQUITY) / 100);
   return { expected, actual, gap, threshold, breached: Math.abs(gap) > threshold, byStrategy };
 }
+
+// ---------------------------------------------------------------------------------------
+// Confronto cumulativo su più sedute, e regole di avviso (persistenza + dedupe).
+// ---------------------------------------------------------------------------------------
+
+/** Un'anomalia con chiave stabile tra un controllo e il successivo (serve a persistenza e dedupe). */
+export interface Anomaly {
+  key: string;
+  summary: string;
+  suggestion: string;
+}
+
+export const CUMULATIVE_SESSIONS = 5;
+/** Sotto questo numero di sedute il confronto cumulativo non ha senso e viene saltato. */
+export const MIN_CUMULATIVE_SESSIONS = 3;
+/**
+ * Soglie di PARTENZA, non calibrate: 0,5% dell'equity con un minimo di 300$. Non c'è uno storico
+ * reale-vs-lab abbastanza lungo per tararle (la piattaforma ha poche sedute con la nuova
+ * allocazione), quindi vanno riviste con i numeri che questo stesso controllo raccoglie.
+ * Si avvisa solo per un divario NEGATIVO (il reale rende meno di quanto i lab implicano): un
+ * divario positivo resta nel riepilogo ma non è un allarme azionabile.
+ */
+export const CUMULATIVE_GAP_PCT_OF_EQUITY = 0.5;
+export const MIN_CUMULATIVE_GAP_DOLLARS = 300;
+
+export interface CumulativeRow {
+  date: string;
+  strategyId: string;
+  labRealized: number;
+  realRealized: number;
+  /** Peso di capitale che quella strategia aveva quel giorno (0 se non ammessa). */
+  weight: number;
+}
+
+export interface CumulativeResult {
+  sessions: number;
+  expected: number;
+  actual: number;
+  gap: number;
+  threshold: number;
+  breached: boolean;
+  byStrategy: { strategyId: string; expected: number; actual: number; gap: number }[];
+}
+
+/**
+ * Atteso per riga = realized_lab × equity × peso / capitale_lab, come in computeDeviation, ma
+ * sommato su più sedute: coglie il divario che si accumula poco alla volta (es. −80$ al giorno)
+ * e che il controllo giornaliero, con la sua soglia, non vede. L'equity è quella di oggi per
+ * tutte le sedute (approssimazione di pochi punti percentuali, dichiarata).
+ */
+export function computeCumulativeGap(rows: CumulativeRow[], realEquity: number, labCapital: number): CumulativeResult {
+  const acc = new Map<string, { expected: number; actual: number }>();
+  const dates = new Set<string>();
+  for (const r of rows) {
+    dates.add(r.date);
+    const cur = acc.get(r.strategyId) ?? { expected: 0, actual: 0 };
+    cur.expected += r.labRealized * ((realEquity * r.weight) / labCapital);
+    cur.actual += r.realRealized;
+    acc.set(r.strategyId, cur);
+  }
+  const byStrategy = [...acc.entries()].map(([strategyId, v]) => ({ strategyId, expected: v.expected, actual: v.actual, gap: v.actual - v.expected }));
+  const expected = byStrategy.reduce((s, r) => s + r.expected, 0);
+  const actual = byStrategy.reduce((s, r) => s + r.actual, 0);
+  const gap = actual - expected;
+  const threshold = Math.max(MIN_CUMULATIVE_GAP_DOLLARS, (realEquity * CUMULATIVE_GAP_PCT_OF_EQUITY) / 100);
+  return { sessions: dates.size, expected, actual, gap, threshold, breached: gap < -threshold, byStrategy };
+}
+
+export interface MonitorState {
+  /** ISO dell'ultimo controllo eseguito, null se mai. */
+  ranAt: string | null;
+  /** Chiavi delle anomalie viste all'ultimo controllo (per la persistenza). */
+  seenKeys: string[];
+  /** Per ogni chiave già segnalata, quando (ISO). Serve a non ripetere lo stesso avviso. */
+  alerted: Record<string, string>;
+}
+
+export const EMPTY_MONITOR_STATE: MonitorState = { ranAt: null, seenKeys: [], alerted: {} };
+/** Il tick gira ogni 5 minuti: il controllo gira una volta ogni due tick, non a ogni giro. */
+export const MIN_CHECK_INTERVAL_MS = 9 * 60_000;
+/** Un'anomalia ancora aperta viene ripetuta al massimo ogni 3 ore. */
+export const REALERT_AFTER_MS = 3 * 3600_000;
+
+export function isCheckDue(state: MonitorState, nowMs: number): boolean {
+  if (!state.ranAt) return true;
+  return nowMs - new Date(state.ranAt).getTime() >= MIN_CHECK_INTERVAL_MS;
+}
+
+/**
+ * Persistenza: si avvisa solo se la stessa anomalia è presente in DUE controlli consecutivi.
+ * Le differenze transitorie sono normali (un bracket chiuso dal broker non ancora registrato dal
+ * tick successivo, un ordine in fase di fill durante la chiusura di fine giornata) e non devono
+ * generare mail. Dedupe: una chiave già segnalata non si ripete prima di REALERT_AFTER_MS, e
+ * ricompare solo se nel frattempo è sparita (stato risolto) e poi tornata.
+ */
+export function decideAlerts(current: Anomaly[], state: MonitorState, nowMs: number): { toAlert: Anomaly[]; next: MonitorState } {
+  const seen = new Set(state.seenKeys);
+  const currentKeys = new Set(current.map((a) => a.key));
+  const toAlert: Anomaly[] = [];
+  const alerted: Record<string, string> = {};
+  for (const [key, at] of Object.entries(state.alerted)) {
+    if (currentKeys.has(key)) alerted[key] = at;
+  }
+  for (const a of current) {
+    if (!seen.has(a.key)) continue;
+    const last = alerted[a.key] ? new Date(alerted[a.key]).getTime() : null;
+    if (last !== null && nowMs - last < REALERT_AFTER_MS) continue;
+    toAlert.push(a);
+    alerted[a.key] = new Date(nowMs).toISOString();
+  }
+  return { toAlert, next: { ranAt: new Date(nowMs).toISOString(), seenKeys: [...currentKeys], alerted } };
+}
