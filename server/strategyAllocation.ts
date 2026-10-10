@@ -21,6 +21,7 @@
 // girato quasi sempre su una sola strategia alla volta finora.
 
 import { db } from "./db.js";
+import { LAB_NET_PNL_SQL } from "./costs.js";
 import { STRATEGY_IDS } from "./debrief.js";
 
 /** Capitale di riferimento di ciascun lab — stesso valore di CAPITAL in orb.ts/vwapReversion.ts/pairsTrading.ts (verificato uguale nei tre, così il drawdown % è comparabile). */
@@ -80,14 +81,17 @@ export interface StrategyEligibility {
 export async function computeEligibility(beforeDateIso: string): Promise<StrategyEligibility[]> {
   const out: StrategyEligibility[] = [];
   for (const strategyId of STRATEGY_IDS) {
-    const rows = (await db()`
-      SELECT (exit_time AT TIME ZONE 'UTC')::date AS d, sum(realized_pnl)::float8 AS net
-      FROM lab_positions
-      WHERE status = 'closed' AND strategy_id = ${strategyId}
-        AND (exit_time AT TIME ZONE 'UTC')::date < ${beforeDateIso}::date
-      GROUP BY 1
-      ORDER BY 1 ASC
-    `) as unknown as { d: string; net: number }[];
+    // Netto di costi di esecuzione (server/costs.ts): un gate sul lordo ammetterebbe strategie ad
+    // alto turnover (VWAP) il cui edge è consumato dallo slippage sul conto reale.
+    const rows = (await db().query(
+      `SELECT (exit_time AT TIME ZONE 'UTC')::date AS d, sum(${LAB_NET_PNL_SQL})::float8 AS net
+       FROM lab_positions
+       WHERE status = 'closed' AND strategy_id = $1
+         AND (exit_time AT TIME ZONE 'UTC')::date < $2::date
+       GROUP BY 1
+       ORDER BY 1 ASC`,
+      [strategyId, beforeDateIso]
+    )) as unknown as { d: string; net: number }[];
 
     const sessionsAvailable = rows.length;
 

@@ -3,6 +3,7 @@
 // classifica deve valere in entrambi i posti, non due formule leggermente diverse.
 
 import { db } from "./db.js";
+import { LAB_NET_PNL_SQL } from "./costs.js";
 import { STRATEGY_ID as ORB_STRATEGY_ID } from "./orb.js";
 import { STRATEGY_ID as VWAP_STRATEGY_ID } from "./vwapReversion.js";
 import { STRATEGY_ID as PAIRS_STRATEGY_ID } from "./pairsTrading.js";
@@ -55,7 +56,7 @@ export async function computeRanking(beforeDateIso: string): Promise<Ranking> {
 
   const dates = dateRows.map((r) => r.d);
   const perfRows = (await db().query(
-    `SELECT strategy_id, coalesce(sum(realized_pnl), 0)::float8 AS net, count(*)::int AS trades
+    `SELECT strategy_id, coalesce(sum(${LAB_NET_PNL_SQL}), 0)::float8 AS net, count(*)::int AS trades
      FROM lab_positions
      WHERE status = 'closed' AND (exit_time AT TIME ZONE 'UTC')::date = ANY($1::date[])
      GROUP BY strategy_id`,
@@ -80,9 +81,10 @@ export interface TodayResult {
 
 /** Risultato realizzato reale di una strategia per la seduta odierna (dal vero orario di apertura, mai da mezzanotte UTC). */
 export async function todayResultFor(strategyId: string, sessionOpenUtc: string): Promise<TodayResult> {
-  const rows = (await db()`
-    SELECT coalesce(sum(realized_pnl), 0)::float8 AS net, count(*)::int AS trades
-    FROM lab_positions WHERE status = 'closed' AND strategy_id = ${strategyId} AND exit_time >= ${sessionOpenUtc}
-  `) as unknown as { net: number; trades: number }[];
+  const rows = (await db().query(
+    `SELECT coalesce(sum(${LAB_NET_PNL_SQL}), 0)::float8 AS net, count(*)::int AS trades
+     FROM lab_positions WHERE status = 'closed' AND strategy_id = $1 AND exit_time >= $2`,
+    [strategyId, sessionOpenUtc]
+  )) as unknown as { net: number; trades: number }[];
   return { net: rows[0]?.net ?? 0, trades: rows[0]?.trades ?? 0 };
 }

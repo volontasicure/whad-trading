@@ -15,6 +15,7 @@ import { neon } from "@neondatabase/serverless";
 import { alpacaFetch, alpacaDataFetch } from "../server/alpaca.js";
 import { fetchMarketSession } from "../server/marketHours.js";
 import { UNIVERSE_SYMBOLS } from "../server/universe.js";
+import { LAB_COST_PCT_PER_SIDE } from "../server/costs.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
   computeATRPct,
@@ -217,7 +218,7 @@ const dailyNet: Record<"orb" | "vwap" | "pairs", number[]> = { orb: [], vwap: []
 // numero di trade chiusi per seduta, statistiche per trade AL NETTO dei costi (BACKTEST_COST_PCT
 // per lato, default 0,023% = misura sui fill reali del 10/10/2026) e date delle sedute valutate.
 // "Trade" = round trip singolo (ORB/VWAP) o coppia completa (pairs, P&L delle due gambe sommato).
-const BACKTEST_COST_PCT = process.env.BACKTEST_COST_PCT ? Number(process.env.BACKTEST_COST_PCT) : 0.00023;
+const BACKTEST_COST_PCT = process.env.BACKTEST_COST_PCT ? Number(process.env.BACKTEST_COST_PCT) : LAB_COST_PCT_PER_SIDE;
 type StratKey = "orb" | "vwap" | "pairs";
 const tradeStats: Record<StratKey, { n: number; wins: number; sumWinNet: number; sumLossNet: number }> = {
   orb: { n: 0, wins: 0, sumWinNet: 0, sumLossNet: 0 },

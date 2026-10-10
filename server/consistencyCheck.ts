@@ -15,6 +15,7 @@
 
 import { alpacaFetch } from "./alpaca.js";
 import { db } from "./db.js";
+import { LAB_NET_PNL_SQL } from "./costs.js";
 import { fetchMarketSession } from "./marketHours.js";
 import { STRATEGY_ID as ORB_STRATEGY_ID } from "./orb.js";
 import { STRATEGY_ID as VWAP_STRATEGY_ID } from "./vwapReversion.js";
@@ -112,7 +113,7 @@ export async function runConsistencyChecks(opts: { tradingDate: string; sessionO
       [sessionOpenUtc]
     ),
     q<{ strategy_id: string; pnl: number }>(
-      `SELECT strategy_id, coalesce(sum(realized_pnl), 0)::float8 AS pnl
+      `SELECT strategy_id, coalesce(sum(${LAB_NET_PNL_SQL}), 0)::float8 AS pnl
        FROM lab_positions WHERE status = 'closed' AND exit_time >= $1 GROUP BY strategy_id`,
       [sessionOpenUtc]
     ),
@@ -217,7 +218,7 @@ export async function computeCumulativeFromDb(tradingDate: string, equity: numbe
   // Intervallo di date invece di un array: evita di dipendere da come il driver serializza gli array.
   const [labRows, realRows] = await Promise.all([
     query<{ d: string; strategy_id: string; pnl: number }>(
-      `SELECT to_char((exit_time AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS d, strategy_id, sum(realized_pnl)::float8 AS pnl
+      `SELECT to_char((exit_time AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS d, strategy_id, sum(${LAB_NET_PNL_SQL})::float8 AS pnl
        FROM lab_positions WHERE status = 'closed'
          AND (exit_time AT TIME ZONE 'UTC')::date >= $1::date AND (exit_time AT TIME ZONE 'UTC')::date <= $2::date
        GROUP BY 1, 2`,

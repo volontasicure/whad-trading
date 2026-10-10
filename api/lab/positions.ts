@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { db } from "../../server/db.js";
+import { LAB_NET_PNL_SQL } from "../../server/costs.js";
 import { fetchMarketSession } from "../../server/marketHours.js";
 import { computeLabPeriodPnl, computeRealPeriodPnl } from "../../server/periodPnl.js";
 
@@ -70,12 +71,15 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
     const sessionOpenUtc = await resolveRealizedSessionStartUtc();
 
     const [rows, labPeriods, realPeriod] = await Promise.all([
-      db()`
-        SELECT strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price,
-               realized_pnl::float8 AS realized_pnl, status
-        FROM lab_positions
-        WHERE status = 'open' OR (status = 'closed' AND exit_time >= ${sessionOpenUtc ?? "9999-01-01"})
-      ` as unknown as Promise<Row[]>,
+      // realized_pnl delle righe chiuse NETTO di costi (server/costs.ts), coerente con i
+      // periodi sotto (computeLabPeriodPnl) e con il gate di ammissione.
+      db().query(
+        `SELECT strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price,
+                CASE WHEN status = 'closed' THEN ${LAB_NET_PNL_SQL} ELSE realized_pnl END::float8 AS realized_pnl, status
+         FROM lab_positions
+         WHERE status = 'open' OR (status = 'closed' AND exit_time >= $1)`,
+        [sessionOpenUtc ?? "9999-01-01"]
+      ) as unknown as Promise<Row[]>,
       computeLabPeriodPnl(),
       computeRealPeriodPnl(),
     ]);

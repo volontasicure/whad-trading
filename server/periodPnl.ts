@@ -7,6 +7,7 @@
 // debrief.ts).
 
 import { db } from "./db.js";
+import { LAB_NET_PNL_SQL } from "./costs.js";
 
 export interface PeriodPnl {
   lastSession: number;
@@ -39,13 +40,13 @@ function windowSums(netByDateDesc: number[]): Omit<PeriodPnl, "sinceInception"> 
 export async function computeLabPeriodPnl(): Promise<Record<string, PeriodPnl>> {
   const [recentRows, totalRows] = (await Promise.all([
     db().query(
-      `SELECT strategy_id, (exit_time AT TIME ZONE 'UTC')::date AS d, sum(realized_pnl)::float8 AS net
+      `SELECT strategy_id, (exit_time AT TIME ZONE 'UTC')::date AS d, sum(${LAB_NET_PNL_SQL})::float8 AS net
        FROM lab_positions
        WHERE status = 'closed' AND exit_time >= now() - interval '${RECENT_WINDOW_DAYS} days'
        GROUP BY strategy_id, d ORDER BY strategy_id, d DESC`
     ),
     db().query(
-      `SELECT strategy_id, sum(realized_pnl)::float8 AS total
+      `SELECT strategy_id, sum(${LAB_NET_PNL_SQL})::float8 AS total
        FROM lab_positions WHERE status = 'closed' GROUP BY strategy_id`
     ),
   ])) as unknown as [{ strategy_id: string; d: string; net: number }[], { strategy_id: string; total: number }[]];
