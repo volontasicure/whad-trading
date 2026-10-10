@@ -324,7 +324,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let vwapTrend = (await getCachedState<Record<string, VwapTrendContext>>(VWAP_STRATEGY_ID, tradingDate, "trend")) ?? {};
     let pairStats = (await getCachedState<PairStats[]>(PAIRS_STRATEGY_ID, tradingDate, "pair_stats")) ?? [];
     if (Object.keys(orbAtr).length === 0 || Object.keys(vwapTrend).length === 0 || pairStats.length === 0 || !coversAllOpenPairs(pairStats)) {
-      const dailyBars = await fetchDailyBars(90);
+      // 180 giorni di calendario ≈ 120-124 sedute: la finestra su cui il pairs è validato (con 90
+      // giorni, ~62 sedute, l'edge fuori campione era ~0 — vedi CLAUDE.md, 10/10/2026).
+      const dailyBars = await fetchDailyBars(180);
       const closesBySymbol: Record<string, number[]> = {};
       for (const symbol of UNIVERSE_SYMBOLS) closesBySymbol[symbol] = dailyBars[symbol].map((b) => b.c);
 
