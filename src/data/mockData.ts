@@ -174,7 +174,7 @@ export const STRATEGIES: Strategy[] = [
     note: "Win rate alto e operazioni brevi, ma soffre le giornate a trend continuo che non tornano sul VWAP.",
     maxPositions: 8,
     params: [
-      { label: "Distanza dal VWAP", value: "≥ 1,2%", hint: "soglia di estensione per entrare contro" },
+      { label: "Distanza dal VWAP", value: "≥ 2,5%", hint: "soglia di estensione per entrare contro" },
       { label: "Filtro esaurimento", value: "RSI 14 > 70 / < 30", hint: "conferma di momentum in rallentamento" },
       { label: "Target", value: "VWAP", hint: "chiusura al ritorno sulla media di giornata" },
       { label: "Stop loss", value: "−0,6%", hint: "oltre l'estremo della candela di ingresso" },

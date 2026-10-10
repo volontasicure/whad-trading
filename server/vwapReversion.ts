@@ -6,7 +6,12 @@
 export const STRATEGY_ID = "vwap_reversion";
 export const MAX_POSITIONS = 8;
 export const CAPITAL = 100_000;
-export const EXTENSION_THRESHOLD_PCT = 1.2;
+// 2,5% dal 10/10/2026 (era 1,2%). Con i costi di esecuzione misurati sui fill reali (~0,023%
+// per lato) il VWAP a 1,2% era negativo al netto su entrambe le finestre di backtest (−3.984/
+// −3.258, 1.300 trade per finestra): l'edge lordo per trade (~0,03%) è dello stesso ordine del
+// costo. A 2,5% il turnover scende del 90% e il netto è +492/+1.288 (120/90 trade) — indizio
+// non prova, ma a edge nullo il costo massimo cala da ~7k$ a ~0,6k$ per finestra. Vedi CLAUDE.md.
+export const EXTENSION_THRESHOLD_PCT = 2.5;
 export const RSI_PERIOD = 14;
 export const RSI_OVERBOUGHT = 70;
 export const RSI_OVERSOLD = 30;

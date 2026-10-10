@@ -196,7 +196,7 @@ const EXP_VWAP_EXTENSION_PCT = process.env.EXP_VWAP_EXTENSION_PCT ? Number(proce
 if (EXP_ORB_RANGE_MINUTES != null) console.log(`ORB: range di apertura override=${EXP_ORB_RANGE_MINUTES} min (produzione: 15)`);
 if (EXP_ORB_VOLUME_MULT != null) console.log(`ORB: soglia volume override=${EXP_ORB_VOLUME_MULT}× (produzione: 1.8×)`);
 if (EXP_VWAP_MAX_HOLD_MIN != null) console.log(`VWAP: max hold override=${EXP_VWAP_MAX_HOLD_MIN} min (produzione: 45)`);
-if (EXP_VWAP_EXTENSION_PCT != null) console.log(`VWAP: soglia estensione override=${EXP_VWAP_EXTENSION_PCT}% (produzione: 1.2%)`);
+if (EXP_VWAP_EXTENSION_PCT != null) console.log(`VWAP: soglia estensione override=${EXP_VWAP_EXTENSION_PCT}% (produzione: 2.5%)`);
 
 // Variante sulla regola EOD stessa, valutata il 1/10/2026 su uno storico molto più lungo (fino
 // a ~6 mesi, non più 39+39 giorni) per ridiscutere "ha senso chiudere sempre tutto ogni
