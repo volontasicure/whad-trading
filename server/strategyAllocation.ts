@@ -65,6 +65,21 @@ export const DRAWDOWN_LOOKBACK_SESSIONS = 20;
 export const MIN_RECENT_AVG_NET = 0;
 export const RECENT_AVG_LOOKBACK_SESSIONS = 5;
 
+/**
+ * Secondo orizzonte, dall'11/10/2026: la media a 5 sedute da sola riammette una strategia
+ * negativa da mesi dopo una sola settimana fortunata — il 12/10 l'ORB (−8.850$ netto su 101
+ * sedute, −13.254$ nella finestra precedente) sarebbe tornata al 50% del capitale reale per una
+ * settimana lorda di +402$. Si richiede anche media ≥ 0 sulle ultime LONG_AVG_LOOKBACK_SESSIONS
+ * sedute. Simulato sulle serie giornaliere di backtest (scripts/gate-sim.mjs, due finestre
+ * indipendenti, netto di costi): gate attuale +1.472/+1.143, con la media a 20 sedute
+ * +1.738/+1.581 — migliora su entrambe e porta le sedute con ORB ammessa da 18/9 a 3/0. Con la
+ * media a 10 sedute il risultato è misto (peggio sulla finestra recente): l'orizzonte conta.
+ * Differenze di poche centinaia di dollari su ~80 sedute: indizio coerente, non prova; 3
+ * varianti provate sulle stesse serie (un po' di selezione a posteriori).
+ */
+export const MIN_LONG_AVG_NET = 0;
+export const LONG_AVG_LOOKBACK_SESSIONS = 20;
+
 export interface StrategyEligibility {
   strategyId: string;
   eligible: boolean;
@@ -72,6 +87,8 @@ export interface StrategyEligibility {
   sessionsAvailable: number;
   drawdownPct: number;
   recentAvgNet: number;
+  /** Media del netto sulle ultime LONG_AVG_LOOKBACK_SESSIONS sedute (o su quelle disponibili, se meno). */
+  longAvgNet: number;
 }
 
 /**
@@ -112,6 +129,10 @@ export async function computeEligibility(beforeDateIso: string): Promise<Strateg
     const recentShort = rows.slice(-RECENT_AVG_LOOKBACK_SESSIONS);
     const recentAvgNet = recentShort.length > 0 ? recentShort.reduce((s, r) => s + r.net, 0) / recentShort.length : 0;
 
+    // Media lunga, ultime LONG_AVG_LOOKBACK_SESSIONS sedute (vedi la costante sopra).
+    const recentLong = rows.slice(-LONG_AVG_LOOKBACK_SESSIONS);
+    const longAvgNet = recentLong.length > 0 ? recentLong.reduce((s, r) => s + r.net, 0) / recentLong.length : 0;
+
     let eligible = true;
     let reason = "ammessa";
     if (sessionsAvailable < MIN_TRACK_RECORD_SESSIONS) {
@@ -123,9 +144,12 @@ export async function computeEligibility(beforeDateIso: string): Promise<Strateg
     } else if (recentAvgNet < MIN_RECENT_AVG_NET) {
       eligible = false;
       reason = `media ultime ${RECENT_AVG_LOOKBACK_SESSIONS} sedute ${recentAvgNet.toFixed(0)}$, sotto soglia`;
+    } else if (longAvgNet < MIN_LONG_AVG_NET) {
+      eligible = false;
+      reason = `media ultime ${LONG_AVG_LOOKBACK_SESSIONS} sedute ${longAvgNet.toFixed(0)}$ sotto soglia (la media a ${RECENT_AVG_LOOKBACK_SESSIONS} è ${recentAvgNet.toFixed(0)}$)`;
     }
 
-    out.push({ strategyId, eligible, reason, sessionsAvailable, drawdownPct, recentAvgNet });
+    out.push({ strategyId, eligible, reason, sessionsAvailable, drawdownPct, recentAvgNet, longAvgNet });
   }
   return out;
 }
