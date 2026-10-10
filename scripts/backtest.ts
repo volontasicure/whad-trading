@@ -96,6 +96,15 @@ const EXP_PAIRS_DELAY_MIN = process.env.EXP_PAIRS_DELAY_MIN ? Number(process.env
 if (EXP_ORB_STOP_MULT != null) console.log(`EXP_ORB_STOP_MULT=${EXP_ORB_STOP_MULT}`);
 if (EXP_PAIRS_DELAY_MIN > 0) console.log(`EXP_PAIRS_DELAY_MIN=${EXP_PAIRS_DELAY_MIN}`);
 
+// EXP_DAILY_LOOKBACK=N: quante chiusure giornaliere (sedute) alimentano correlazione, media e
+// deviazione standard del rapporto dei pairs (e i filtri di trend VWAP, spenti). Default 120 =
+// il valore implicito di tutte le validazioni fino al 10/10/2026 (LIMIT 120 in
+// loadDailyClosesBeforeDate). Scoperto il 10/10 che la PRODUZIONE usa circa 62 sedute
+// (api/cron/tick.ts: fetchDailyBars(90) = 90 giorni di calendario) — una discrepanza tra
+// backtest e produzione mai notata. Il limite SQL è ora 250 per poter testare finestre fino a 180.
+const EXP_DAILY_LOOKBACK = process.env.EXP_DAILY_LOOKBACK ? Number(process.env.EXP_DAILY_LOOKBACK) : 120;
+if (process.env.EXP_DAILY_LOOKBACK) console.log(`EXP_DAILY_LOOKBACK=${EXP_DAILY_LOOKBACK}`);
+
 // EXP_PAIRS_MAX_HOLD_DAYS=N chiude forzatamente una coppia (entrambe le gambe, a prescindere
 // dal P&L) se resta aperta da almeno N sedute senza che lo z-score sia mai rientrato — ipotesi
 // di sicurezza analoga al fix MAX_HOLD_MINUTES di VWAP (24/9/2026). Nata dalla scoperta
@@ -268,7 +277,7 @@ async function loadDailyClosesBeforeDate(beforeDateIso: string): Promise<Record<
   for (const symbol of UNIVERSE_SYMBOLS) {
     const rows = (await sql.query(
       `SELECT trading_date, open, high, low, close FROM daily_bars
-       WHERE symbol = $1 AND trading_date < $2 ORDER BY trading_date DESC LIMIT 120`,
+       WHERE symbol = $1 AND trading_date < $2 ORDER BY trading_date DESC LIMIT 250`,
       [symbol, beforeDateIso]
     )) as { trading_date: string; open: string; high: string; low: string; close: string }[];
     out[symbol] = rows
@@ -315,10 +324,13 @@ function flag(msg: string) {
   console.warn("  ANOMALIA:", msg);
 }
 
+// turnover = nozionale scambiato (ingresso + uscita, in $) per strategia: serve a calcolare il
+// P&L al netto di costi a posteriori (netto = lordo − pct_per_lato × turnover) senza rilanciare
+// il backtest — le decisioni di strategia non dipendono dal P&L, quindi i costi non le cambiano.
 const totals = {
-  orb: { realized: 0, entries: 0, exits: 0, exitReasons: {} as Record<string, number> },
-  vwap: { realized: 0, entries: 0, exits: 0, exitReasons: {} as Record<string, number> },
-  pairs: { realized: 0, entries: 0, exits: 0, exitReasons: {} as Record<string, number> },
+  orb: { realized: 0, turnover: 0, entries: 0, exits: 0, exitReasons: {} as Record<string, number> },
+  vwap: { realized: 0, turnover: 0, entries: 0, exits: 0, exitReasons: {} as Record<string, number> },
+  pairs: { realized: 0, turnover: 0, entries: 0, exits: 0, exitReasons: {} as Record<string, number> },
 };
 
 async function run() {
@@ -365,7 +377,7 @@ async function run() {
 
     const dailyBarsBefore = await loadDailyClosesBeforeDate(day);
     const closesBySymbol: Record<string, number[]> = {};
-    for (const s of UNIVERSE_SYMBOLS) closesBySymbol[s] = dailyBarsBefore[s].map((b) => b.c);
+    for (const s of UNIVERSE_SYMBOLS) closesBySymbol[s] = dailyBarsBefore[s].map((b) => b.c).slice(-EXP_DAILY_LOOKBACK);
 
     const orbAtr: Record<string, number> = {};
     for (const s of UNIVERSE_SYMBOLS) {
@@ -471,6 +483,7 @@ async function run() {
 
       for (const ex of vwapExits) {
         totals.vwap.realized += ex.realizedPnl;
+        totals.vwap.turnover += ex.position.qty * (ex.position.entryPrice + ex.exitPrice);
         totals.vwap.exits++;
         dayCounters.vwapExits++;
         dayCounters.vwapPnl += ex.realizedPnl;
@@ -481,6 +494,7 @@ async function run() {
       }
       for (const ex of orbExits) {
         totals.orb.realized += ex.realizedPnl;
+        totals.orb.turnover += ex.position.qty * (ex.position.entryPrice + ex.exitPrice);
         totals.orb.exits++;
         dayCounters.orbExits++;
         totals.orb.exitReasons[ex.reason] = (totals.orb.exitReasons[ex.reason] ?? 0) + 1;
@@ -489,6 +503,11 @@ async function run() {
       }
       for (const ex of pairsExits) {
         totals.pairs.realized += ex.realizedPnl;
+        for (const legId of ex.legIds) {
+          const leg = pairsOpen.find((l) => l.id === legId);
+          const px = leg ? prices[leg.symbol] : undefined;
+          if (leg && px != null) totals.pairs.turnover += leg.qty * (leg.entryPrice + px);
+        }
         totals.pairs.exits++;
         dayCounters.pairsExits++;
         totals.pairs.exitReasons[ex.reason] = (totals.pairs.exitReasons[ex.reason] ?? 0) + 1;
@@ -653,6 +672,8 @@ async function run() {
       const strat = strategyOf.get(c.id);
       if (strat) {
         totals[strat].realized += c.realizedPnl;
+        const row = singleRows.find((r) => r.id === c.id);
+        if (row) totals[strat].turnover += row.qty * (row.entryPrice + c.exitPrice);
         totals[strat].exits++;
         totals[strat].exitReasons["eod_safety_net"] = (totals[strat].exitReasons["eod_safety_net"] ?? 0) + 1;
         if (strat === "vwap") dayCounters.vwapPnl += c.realizedPnl;
@@ -697,6 +718,7 @@ async function run() {
         if (!leg || price == null) continue;
         const dir = leg.side === "LONG" ? 1 : -1;
         totals.pairs.realized += Math.round(leg.qty * (price - leg.entryPrice) * dir);
+        totals.pairs.turnover += leg.qty * (leg.entryPrice + price);
         totals.pairs.exits++;
         totals.pairs.exitReasons["eod_safety_net"] = (totals.pairs.exitReasons["eod_safety_net"] ?? 0) + 1;
         strategyOf.delete(legId);
@@ -721,6 +743,7 @@ async function run() {
           const price = lastPrices[leg.symbol];
           const dir = leg.side === "LONG" ? 1 : -1;
           totals.pairs.realized += Math.round(leg.qty * (price - leg.entryPrice) * dir);
+          totals.pairs.turnover += leg.qty * (leg.entryPrice + price);
           totals.pairs.exits++;
           totals.pairs.exitReasons["max_hold_days"] = (totals.pairs.exitReasons["max_hold_days"] ?? 0) + 1;
           strategyOf.delete(leg.id);
@@ -749,6 +772,7 @@ async function run() {
   console.log("\n=== Riepilogo finale ===");
   for (const [name, t] of Object.entries(totals)) {
     console.log(`${name}: ${t.entries} entrate, ${t.exits} uscite, P&L realizzato = ${t.realized}, motivi uscita:`, t.exitReasons);
+    console.log(`turnover ${name}: ${Math.round(t.turnover)}`);
   }
   // Regole di scelta giornaliera della strategia (analogo del debriefing): P&L che si sarebbe
   // ottenuto scegliendo ogni giorno una strategia con la regola indicata, calcolato sui risultati
