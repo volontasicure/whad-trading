@@ -4,7 +4,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
 import { BACKTEST_META } from "../data/backtestResults";
-import { BACKTEST_ORDER, BEST_STRATEGY_INDEX, DEBRIEF, STRATEGIES, money } from "../data/mockData";
+import { BACKTEST_ORDER, BEST_STRATEGY_INDEX, STRATEGIES, money } from "../data/mockData";
 
 interface DisplayRankEntry {
   strategyId: string;
@@ -194,35 +194,6 @@ export function DebriefView() {
                 Vedi il laboratorio
               </div>
             </div>
-          </div>
-
-          <div className="card" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
-            <div className="mono" style={{ fontSize: 10, letterSpacing: "0.13em", color: "var(--text-faint)" }}>
-              CHECKLIST PRE-APERTURA
-            </div>
-            {DEBRIEF.checklist.map((c, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div
-                  className="mono"
-                  style={{
-                    width: 16,
-                    height: 16,
-                    flex: "0 0 auto",
-                    borderRadius: 5,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 10,
-                    background: c.status === "ok" ? "var(--green-tint)" : "var(--amber-tint)",
-                    color: c.status === "ok" ? "var(--green-ink)" : "var(--amber-ink)",
-                  }}
-                >
-                  {c.status === "ok" ? "✓" : "!"}
-                </div>
-                <div style={{ fontSize: 12.5, flex: "1 1 auto", minWidth: 0 }}>{c.label}</div>
-                <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", whiteSpace: "nowrap" }}>{c.value}</div>
-              </div>
-            ))}
           </div>
         </div>
       </div>

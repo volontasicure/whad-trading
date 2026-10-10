@@ -111,16 +111,6 @@ export interface Session {
   costs: number;
 }
 
-export interface Debrief {
-  date: string;
-  ranking: { strategyId: StrategyId; score: number; basis: "backtest_20_sessions" }[];
-  proposed: StrategyId;
-  confidence: number;
-  vix: { value: number; regime: "calmo" | "normale" | "teso" };
-  checklist: { label: string; value: string; status: "ok" | "warning" | "error" }[];
-  confirmedAt: string | null;
-}
-
 export interface SessionRules {
   closeProfitableAtEod: boolean;
   eodOrderTime: string;

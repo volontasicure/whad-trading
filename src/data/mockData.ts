@@ -1,6 +1,5 @@
 import type {
   BrokerStatus,
-  Debrief,
   Execution,
   PeriodPnl,
   Portfolio,
@@ -420,25 +419,6 @@ export const STRATEGY_HISTORY_STATS: StrategyHistoryStat[] = STRATEGIES.map((s, 
     costs: s.backtest.costs,
   };
 });
-
-export const DEBRIEF: Debrief = {
-  date: "2026-09-12",
-  ranking: BACKTEST_ORDER.map((o, k) => ({
-    strategyId: STRATEGIES[o.i].id,
-    score: Math.round((16.4 - k * 2.5) * 10) / 10,
-    basis: "backtest_20_sessions",
-  })),
-  proposed: STRATEGIES[BEST_STRATEGY_INDEX].id,
-  confidence: 78,
-  vix: { value: 14.8, regime: "calmo" },
-  checklist: [
-    { label: "Dati di mercato Alpaca", value: "OK", status: "ok" },
-    { label: "Allineamento dei 3 portafogli lab", value: "identici", status: "ok" },
-    { label: "Posizioni residue dalla seduta precedente", value: "0", status: "ok" },
-    { label: "Eventi macro in giornata", value: "CPI 14:30", status: "warning" },
-  ],
-  confirmedAt: null,
-};
 
 export const SESSION_RULES: SessionRules = {
   closeProfitableAtEod: true,
