@@ -3,13 +3,14 @@ import { Header } from "../components/Header";
 import { StatusBadge } from "../components/StatusBadge";
 import { TickerTape } from "../components/TickerTape";
 import { useAppState } from "../context/AppState";
-import { BACKTEST_ORDER, BEST_STRATEGY_INDEX, DEBRIEF, STRATEGIES, dec, money } from "../data/mockData";
+import { BACKTEST_META } from "../data/backtestResults";
+import { BACKTEST_ORDER, BEST_STRATEGY_INDEX, DEBRIEF, STRATEGIES, money } from "../data/mockData";
 
 interface DisplayRankEntry {
   strategyId: string;
   name: string;
   note: string;
-  /** Etichetta pronta per la UI: netto reale in € per i dati reali, punteggio 0-20 per il fallback finto. */
+  /** Etichetta pronta per la UI: netto in $ — sulle sedute live reali, o sul backtest storico nel fallback. */
   scoreLabel: string;
   /** 0-100, per la barra. */
   barPct: number;
@@ -63,28 +64,33 @@ export function DebriefView() {
     });
     basisLine = `Punteggio sulle ultime ${realDebrief.sessionsUsed} sedut${realDebrief.sessionsUsed === 1 ? "a" : "e"} reali: P&L netto realizzato (lab_positions), solo informativo — non decide più l'allocazione. Sharpe/win rate non ancora calcolati sul reale.`;
   } else {
-    ranking = BACKTEST_ORDER.map((o, k) => {
+    // Fallback quando non c'è ancora storico live (o /api/debrief non risponde): classifica sul
+    // backtest storico reale (src/data/backtestResults.ts, netto di costi), non su numeri inventati.
+    const maxAbsNet = Math.max(1, ...BACKTEST_ORDER.map((o) => Math.abs(o.net)));
+    ranking = BACKTEST_ORDER.map((o) => {
       const s = STRATEGIES[o.i];
-      const entry = DEBRIEF.ranking[k];
       return {
         strategyId: s.id,
         name: s.name,
         note: s.note,
-        scoreLabel: dec(entry.score, 1),
-        barPct: (entry.score / 20) * 100,
+        scoreLabel: `${money(o.net)} $`,
+        barPct: Math.max(0, (o.net / maxAbsNet) * 100),
       };
     });
-    // Nessun dato reale di allocazione ancora — fallback illustrativo: il migliore del backtest
-    // finto al 100%, gli altri due esclusi.
+    // Allocazione solo indicativa: la migliore del backtest storico al 100%, le altre escluse.
+    // Non è la regola vera (server/strategyAllocation.ts: storico lab live, drawdown, media a 5 sedute).
     allocation = STRATEGIES.map((s, i) => ({
       strategyId: s.id,
       name: s.name,
       note: s.note,
       eligible: i === BEST_STRATEGY_INDEX,
-      reason: i === BEST_STRATEGY_INDEX ? "migliore nel backtest simulato" : "non la migliore nel backtest simulato",
+      reason: i === BEST_STRATEGY_INDEX ? "migliore nel backtest storico" : "non la migliore nel backtest storico",
       weightPct: i === BEST_STRATEGY_INDEX ? 100 : 0,
     }));
-    basisLine = "Punteggio su 20 sedute (dati simulati, nessuno storico reale ancora): P&L netto al netto dei costi, Sharpe, % vincenti e coerenza con il regime di volatilità attesa.";
+    basisLine =
+      `Backtest storico di ${BACKTEST_META.sessions} sedute (${BACKTEST_META.firstDay} – ${BACKTEST_META.lastDay}), ` +
+      `P&L netto dei costi di esecuzione. Nessuno storico live disponibile: classifica e allocazione sono indicative ` +
+      `(l'allocazione effettiva usa storico lab live, drawdown e media a 5 sedute).`;
   }
 
   const allocatedNames = allocation.filter((a) => a.weightPct > 0).map((a) => a.name);
@@ -105,12 +111,12 @@ export function DebriefView() {
                 status={debriefSource}
                 title={
                   debriefSource === "offline"
-                    ? "/api/debrief non raggiungibile: classifica su backtest finto"
+                    ? "/api/debrief non raggiungibile: classifica sul backtest storico (snapshot)"
                     : debriefSource === "loading"
                       ? "Prima lettura della classifica in corso"
                       : hasRealRanking
                         ? "Netto reale da lab_positions"
-                        : "Nessuno storico reale ancora: classifica su backtest finto"
+                        : "Nessuno storico live ancora: classifica sul backtest storico (snapshot)"
                 }
               />
             </div>
