@@ -3,6 +3,12 @@ import { Header } from "../components/Header";
 import { PnlHistogram } from "../components/PnlHistogram";
 import { TickerTape } from "../components/TickerTape";
 import { STRATEGIES, dec, money, pnlColor } from "../data/mockData";
+import { BACKTEST_META } from "../data/backtestResults";
+
+/** "2026-05-18" → "18 mag 2026" */
+function shortDate(iso: string): string {
+  return new Date(`${iso}T12:00:00Z`).toLocaleDateString("it-IT", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+}
 
 export function StrategyView() {
   const { id } = useParams<{ id?: string }>();
@@ -63,8 +69,9 @@ export function StrategyView() {
             <div className="card" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 15, fontWeight: 500 }}>Backtest</div>
-                <div className="mono" style={{ fontSize: 10, letterSpacing: "0.1em", color: "var(--text-faint)", whiteSpace: "nowrap" }}>
-                  ULTIME 20 SEDUTE · STESSO UNIVERSO
+                <div className="mono" style={{ fontSize: 10, letterSpacing: "0.1em", color: "var(--text-faint)" }}>
+                  {BACKTEST_META.sessions} SEDUTE · {shortDate(BACKTEST_META.firstDay).toUpperCase()} – {shortDate(BACKTEST_META.lastDay).toUpperCase()} · NETTO DI COSTI{" "}
+                  {(BACKTEST_META.costPctPerSide * 100).toFixed(3).replace(".", ",")}%/LATO
                 </div>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(84px, 1fr))", gap: "14px 10px" }}>
@@ -72,14 +79,18 @@ export function StrategyView() {
                 <BacktestMetric k="SHARPE" v={dec(sel.backtest.sharpe, 2)} />
                 <BacktestMetric k="WIN %" v={`${Math.round(sel.backtest.winRate * 100)}%`} />
                 <BacktestMetric k="OP. / SEDUTA" v={String(sel.backtest.tradesPerSession)} />
-                <BacktestMetric k="COSTI" v={`−${sel.backtest.costs}`} color="var(--red-ink)" />
+                <BacktestMetric k="COSTI / SEDUTA" v={`−${sel.backtest.costs}`} color="var(--red-ink)" />
                 <BacktestMetric k="PROFIT FACTOR" v={dec(sel.backtest.profitFactor, 2)} />
               </div>
             </div>
 
             <div className="card" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
               <div style={{ fontSize: 15, fontWeight: 500 }}>P&amp;L per seduta</div>
-              <PnlHistogram values={sel.backtest.dailyPnl} />
+              <PnlHistogram
+                values={sel.backtest.dailyPnl}
+                leftLabel={`−${sel.backtest.dailyPnl.length} sedute`}
+                rightLabel={shortDate(BACKTEST_META.lastDay)}
+              />
             </div>
           </div>
         </div>

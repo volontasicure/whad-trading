@@ -11,6 +11,7 @@ import type {
   Strategy,
   StrategyId,
 } from "../types";
+import { BACKTEST_RESULTS } from "./backtestResults";
 
 export const CAPITAL = 100_000;
 
@@ -127,15 +128,7 @@ export const STRATEGIES: Strategy[] = [
       { label: "Take profit", value: "2,0× range", hint: "target simmetrico al rischio assunto" },
       { label: "Titoli max in portafoglio", value: `6 / ${MARKET.length}`, hint: "solo le rotture più ampie" },
     ],
-    backtest: {
-      net: 5860,
-      sharpe: 0.96,
-      winRate: 0.44,
-      tradesPerSession: 12,
-      costs: 84,
-      profitFactor: 2.1,
-      dailyPnl: [-210, 640, 180, -320, 920, -180, 410, 1120, -260, 380, -140, 760, 540, -410, 880, 220, -190, 1040, 360, 1310],
-    },
+    backtest: BACKTEST_RESULTS.orb,
   },
   {
     id: "pairs",
@@ -148,21 +141,13 @@ export const STRATEGIES: Strategy[] = [
     maxPositions: 20,
     params: [
       { label: "Coppie attive", value: "10", hint: "una gamba long e una short per coppia" },
-      { label: "Ingresso sullo spread", value: "±2,0σ", hint: "z-score su finestra mobile di 60 minuti" },
+      { label: "Ingresso sullo spread", value: "±2,0σ", hint: "z-score del rapporto di prezzo sulle ultime ~120 chiusure giornaliere" },
       { label: "Uscita", value: "0,3σ", hint: "rientro verso la media dello spread" },
       { label: "Stop sullo spread", value: "3,5σ", hint: "rottura della relazione tra i due titoli" },
       { label: "Ricalcolo cointegrazione", value: "giornaliero", hint: "coppie riverificate prima dell'apertura" },
       { label: "Esposizione netta", value: "≈ 0%", hint: "capitale diviso a metà tra long e short" },
     ],
-    backtest: {
-      net: 4310,
-      sharpe: 1.58,
-      winRate: 0.68,
-      tradesPerSession: 40,
-      costs: 236,
-      profitFactor: 1.74,
-      dailyPnl: [180, 240, -80, 310, 190, 270, -120, 220, 360, 140, 290, -60, 330, 210, 180, 400, 90, -110, 260, 340],
-    },
+    backtest: BACKTEST_RESULTS.pairs,
   },
   {
     id: "vwap_reversion",
@@ -181,15 +166,7 @@ export const STRATEGIES: Strategy[] = [
       { label: "Tempo massimo in posizione", value: "90 min", hint: "uscita a mercato se il rientro non arriva" },
       { label: "Titoli max in portafoglio", value: `8 / ${MARKET.length}`, hint: "le estensioni più ampie dell'universo" },
     ],
-    backtest: {
-      net: 3120,
-      sharpe: 1.21,
-      winRate: 0.57,
-      tradesPerSession: 26,
-      costs: 148,
-      profitFactor: 1.49,
-      dailyPnl: [90, 140, -40, 180, 210, 60, -70, 160, 240, 120, 80, -30, 200, 150, 110, 230, 70, -50, 190, 260],
-    },
+    backtest: BACKTEST_RESULTS.vwap_reversion,
   },
 ];
 

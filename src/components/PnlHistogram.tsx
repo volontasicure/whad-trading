@@ -1,9 +1,13 @@
 interface PnlHistogramProps {
   values: number[];
+  /** Etichetta sotto la prima barra (default: "−20"). */
+  leftLabel?: string;
+  /** Etichetta sotto l'ultima barra (default: "oggi"). */
+  rightLabel?: string;
 }
 
 /** Istogramma di P&L per seduta: barra verde sopra la linea dello zero, rossa sotto. */
-export function PnlHistogram({ values }: PnlHistogramProps) {
+export function PnlHistogram({ values, leftLabel = "−20", rightLabel = "oggi" }: PnlHistogramProps) {
   const barMax = Math.max(...values.map((v) => Math.abs(v)), 1);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -38,8 +42,8 @@ export function PnlHistogram({ values }: PnlHistogramProps) {
         className="mono"
         style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 10, color: "#8d8a82" }}
       >
-        <div>&minus;20</div>
-        <div>oggi</div>
+        <div>{leftLabel}</div>
+        <div>{rightLabel}</div>
       </div>
     </div>
   );

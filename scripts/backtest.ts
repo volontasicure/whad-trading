@@ -9,7 +9,7 @@
 // solo le barre a 5 minuti dei giorni da rigiocare (session_bars storico non esiste ancora,
 // il tick ha iniziato ad accumularlo solo da questa sessione in poi).
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { neon } from "@neondatabase/serverless";
 import { alpacaFetch, alpacaDataFetch } from "../server/alpaca.js";
@@ -213,6 +213,31 @@ if (EXP_VWAP_EXTENSION_PCT != null) console.log(`VWAP: soglia estensione overrid
 const EXP_EOD_MODE = (process.env.EXP_EOD_MODE as "current" | "pairs-if-profit" | "always" | "never" | undefined) ?? "current";
 if (EXP_EOD_MODE !== "current") console.log(`EOD: modalità override = "${EXP_EOD_MODE}" (produzione: "current")`);
 const dailyNet: Record<"orb" | "vwap" | "pairs", number[]> = { orb: [], vwap: [], pairs: [] };
+// Per BACKTEST_JSON (scheda "Backtest" in StrategyView, scripts/gen-backtest-card.mjs): turnover e
+// numero di trade chiusi per seduta, statistiche per trade AL NETTO dei costi (BACKTEST_COST_PCT
+// per lato, default 0,023% = misura sui fill reali del 10/10/2026) e date delle sedute valutate.
+// "Trade" = round trip singolo (ORB/VWAP) o coppia completa (pairs, P&L delle due gambe sommato).
+const BACKTEST_COST_PCT = process.env.BACKTEST_COST_PCT ? Number(process.env.BACKTEST_COST_PCT) : 0.00023;
+type StratKey = "orb" | "vwap" | "pairs";
+const tradeStats: Record<StratKey, { n: number; wins: number; sumWinNet: number; sumLossNet: number }> = {
+  orb: { n: 0, wins: 0, sumWinNet: 0, sumLossNet: 0 },
+  vwap: { n: 0, wins: 0, sumWinNet: 0, sumLossNet: 0 },
+  pairs: { n: 0, wins: 0, sumWinNet: 0, sumLossNet: 0 },
+};
+const dailyTurnover: Record<StratKey, number[]> = { orb: [], vwap: [], pairs: [] };
+const dailyTrades: Record<StratKey, number[]> = { orb: [], vwap: [], pairs: [] };
+const sessionDates: string[] = [];
+function recordTrade(strat: StratKey, pnl: number, turnover: number) {
+  const net = pnl - BACKTEST_COST_PCT * turnover;
+  const s = tradeStats[strat];
+  s.n++;
+  if (net > 0) {
+    s.wins++;
+    s.sumWinNet += net;
+  } else {
+    s.sumLossNet += -net;
+  }
+}
 
 interface AlpacaIntradayBarRaw {
   t: string;
@@ -351,6 +376,8 @@ async function run() {
   for (const day of tradingDays) {
     dayIndex++;
     const realizedBefore = { orb: totals.orb.realized, vwap: totals.vwap.realized, pairs: totals.pairs.realized };
+    const turnoverBefore = { orb: totals.orb.turnover, vwap: totals.vwap.turnover, pairs: totals.pairs.turnover };
+    const tradesBefore = { orb: tradeStats.orb.n, vwap: tradeStats.vwap.n, pairs: tradeStats.pairs.n };
     const session = await fetchMarketSession(day);
     if (!session) {
       flag(`[${day}] nessuna sessione nel calendario Alpaca (inatteso per un trading day)`);
@@ -484,6 +511,7 @@ async function run() {
       for (const ex of vwapExits) {
         totals.vwap.realized += ex.realizedPnl;
         totals.vwap.turnover += ex.position.qty * (ex.position.entryPrice + ex.exitPrice);
+        recordTrade("vwap", ex.realizedPnl, ex.position.qty * (ex.position.entryPrice + ex.exitPrice));
         totals.vwap.exits++;
         dayCounters.vwapExits++;
         dayCounters.vwapPnl += ex.realizedPnl;
@@ -495,6 +523,7 @@ async function run() {
       for (const ex of orbExits) {
         totals.orb.realized += ex.realizedPnl;
         totals.orb.turnover += ex.position.qty * (ex.position.entryPrice + ex.exitPrice);
+        recordTrade("orb", ex.realizedPnl, ex.position.qty * (ex.position.entryPrice + ex.exitPrice));
         totals.orb.exits++;
         dayCounters.orbExits++;
         totals.orb.exitReasons[ex.reason] = (totals.orb.exitReasons[ex.reason] ?? 0) + 1;
@@ -503,11 +532,14 @@ async function run() {
       }
       for (const ex of pairsExits) {
         totals.pairs.realized += ex.realizedPnl;
+        let pairTurnover = 0;
         for (const legId of ex.legIds) {
           const leg = pairsOpen.find((l) => l.id === legId);
           const px = leg ? prices[leg.symbol] : undefined;
-          if (leg && px != null) totals.pairs.turnover += leg.qty * (leg.entryPrice + px);
+          if (leg && px != null) pairTurnover += leg.qty * (leg.entryPrice + px);
         }
+        totals.pairs.turnover += pairTurnover;
+        recordTrade("pairs", ex.realizedPnl, pairTurnover);
         totals.pairs.exits++;
         dayCounters.pairsExits++;
         totals.pairs.exitReasons[ex.reason] = (totals.pairs.exitReasons[ex.reason] ?? 0) + 1;
@@ -674,6 +706,7 @@ async function run() {
         totals[strat].realized += c.realizedPnl;
         const row = singleRows.find((r) => r.id === c.id);
         if (row) totals[strat].turnover += row.qty * (row.entryPrice + c.exitPrice);
+        recordTrade(strat, c.realizedPnl, row ? row.qty * (row.entryPrice + c.exitPrice) : 0);
         totals[strat].exits++;
         totals[strat].exitReasons["eod_safety_net"] = (totals[strat].exitReasons["eod_safety_net"] ?? 0) + 1;
         if (strat === "vwap") dayCounters.vwapPnl += c.realizedPnl;
@@ -719,6 +752,7 @@ async function run() {
         const dir = leg.side === "LONG" ? 1 : -1;
         totals.pairs.realized += Math.round(leg.qty * (price - leg.entryPrice) * dir);
         totals.pairs.turnover += leg.qty * (leg.entryPrice + price);
+        recordTrade("pairs", Math.round(leg.qty * (price - leg.entryPrice) * dir), leg.qty * (leg.entryPrice + price));
         totals.pairs.exits++;
         totals.pairs.exitReasons["eod_safety_net"] = (totals.pairs.exitReasons["eod_safety_net"] ?? 0) + 1;
         strategyOf.delete(legId);
@@ -744,6 +778,7 @@ async function run() {
           const dir = leg.side === "LONG" ? 1 : -1;
           totals.pairs.realized += Math.round(leg.qty * (price - leg.entryPrice) * dir);
           totals.pairs.turnover += leg.qty * (leg.entryPrice + price);
+          recordTrade("pairs", Math.round(leg.qty * (price - leg.entryPrice) * dir), leg.qty * (leg.entryPrice + price));
           totals.pairs.exits++;
           totals.pairs.exitReasons["max_hold_days"] = (totals.pairs.exitReasons["max_hold_days"] ?? 0) + 1;
           strategyOf.delete(leg.id);
@@ -760,6 +795,11 @@ async function run() {
     dailyNet.orb.push(totals.orb.realized - realizedBefore.orb);
     dailyNet.vwap.push(totals.vwap.realized - realizedBefore.vwap);
     dailyNet.pairs.push(totals.pairs.realized - realizedBefore.pairs);
+    for (const k of ["orb", "vwap", "pairs"] as const) {
+      dailyTurnover[k].push(totals[k].turnover - turnoverBefore[k]);
+      dailyTrades[k].push(tradeStats[k].n - tradesBefore[k]);
+    }
+    sessionDates.push(day);
 
     console.log(
       `[${day}] orb: ${dayCounters.orbEntries} entrate/${dayCounters.orbExits} uscite | ` +
@@ -810,6 +850,27 @@ async function run() {
   console.log(`\nAnomalie rilevate: ${anomalies.length}`);
   for (const a of anomalies) console.log(" -", a);
   if (anomalies.length === 0) console.log("Nessuna anomalia rilevata sui giorni testati.");
+
+  if (process.env.BACKTEST_JSON) {
+    const out = {
+      generatedAt: new Date().toISOString(),
+      costPctPerSide: BACKTEST_COST_PCT,
+      sessionDates,
+      strategies: Object.fromEntries(
+        (["orb", "vwap", "pairs"] as const).map((k) => [
+          k,
+          {
+            dailyGross: dailyNet[k],
+            dailyTurnover: dailyTurnover[k],
+            dailyTrades: dailyTrades[k],
+            trades: tradeStats[k],
+          },
+        ])
+      ),
+    };
+    writeFileSync(process.env.BACKTEST_JSON, JSON.stringify(out, null, 2));
+    console.log(`Risultati scritti in ${process.env.BACKTEST_JSON}`);
+  }
 }
 
 run().catch((err) => {
