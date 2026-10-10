@@ -159,10 +159,17 @@ export function statsForPair(a: string, b: string, closesBySymbolAscending: Reco
  */
 export function selectPairs(
   closesBySymbolAscending: Record<string, number[]>,
-  options?: { maxCointTStat?: number }
+  options?: {
+    maxCointTStat?: number;
+    /** Solo backtest sperimentali (EXP_PAIRS_CANDIDATES): quante coppie non sovrapposte restituire (default MAX_PAIRS). Non alza il tetto di posizioni aperte, che resta MAX_PAIRS nei chiamanti. */
+    maxPairs?: number;
+    /** Solo backtest sperimentali (EXP_EXTRA_UNIVERSE): raggruppamento settoriale alternativo (default SECTORS). */
+    sectors?: Record<string, string>;
+  }
 ): PairStats[] {
+  const maxPairs = options?.maxPairs ?? MAX_PAIRS;
   const bySector = new Map<string, string[]>();
-  for (const [symbol, sector] of Object.entries(SECTORS)) {
+  for (const [symbol, sector] of Object.entries(options?.sectors ?? SECTORS)) {
     const closes = closesBySymbolAscending[symbol];
     if (!closes || closes.length < 20) continue;
     if (!bySector.has(sector)) bySector.set(sector, []);
@@ -199,7 +206,7 @@ export function selectPairs(
     chosen.push(c);
     usedSymbols.add(c.a);
     usedSymbols.add(c.b);
-    if (chosen.length >= MAX_PAIRS) break;
+    if (chosen.length >= maxPairs) break;
   }
 
   return chosen.map(({ a, b, correlation: corr, cointTStat }) => ({
@@ -301,7 +308,11 @@ export function decidePairsEodCloses(openLegs: OpenLeg[], prices: Record<string,
 export function decideExits(
   openLegs: OpenLeg[],
   prices: Record<string, number>,
-  statsByPairKey: Record<string, PairStats>
+  statsByPairKey: Record<string, PairStats>,
+  /** Solo per backtest sperimentali (scripts/backtest.ts, EXP_PAIRS_EXIT_Z) — default EXIT_Z, mai passato dai chiamanti reali. */
+  exitZOverride: number = EXIT_Z,
+  /** Solo per backtest sperimentali (EXP_PAIRS_STOP_Z) — default STOP_Z, mai passato dai chiamanti reali. */
+  stopZOverride: number = STOP_Z
 ): ExitDecision[] {
   const byPair = new Map<string, OpenLeg[]>();
   for (const leg of openLegs) {
@@ -321,8 +332,8 @@ export function decideExits(
     const z = currentZ(priceA, priceB, stats);
     if (z == null) continue;
 
-    const targetReached = Math.abs(z) <= EXIT_Z;
-    const stopHit = Math.abs(z) >= STOP_Z;
+    const targetReached = Math.abs(z) <= exitZOverride;
+    const stopHit = Math.abs(z) >= stopZOverride;
     if (!targetReached && !stopHit) continue;
 
     let realizedPnl = 0;
@@ -346,7 +357,9 @@ export function decideEntries(
   pairs: PairStats[],
   openPairKeys: Set<string>,
   prices: Record<string, number>,
-  freeSlots: number
+  freeSlots: number,
+  /** Solo per backtest sperimentali (scripts/backtest.ts, EXP_PAIRS_ENTRY_Z) — default ENTRY_Z, mai passato dai chiamanti reali. */
+  entryZOverride: number = ENTRY_Z
 ): EntryDecision[] {
   if (freeSlots <= 0) return [];
 
@@ -359,7 +372,7 @@ export function decideEntries(
     if (priceA == null || priceB == null) continue;
 
     const z = currentZ(priceA, priceB, stats);
-    if (z == null || Math.abs(z) < ENTRY_Z) continue;
+    if (z == null || Math.abs(z) < entryZOverride) continue;
 
     const capitalPerLeg = CAPITAL / MAX_PAIRS / 2;
     const qtyA = Math.max(1, Math.floor(capitalPerLeg / priceA));

@@ -14,8 +14,19 @@ import path from "node:path";
 import { neon } from "@neondatabase/serverless";
 import { alpacaFetch, alpacaDataFetch } from "../server/alpaca.js";
 import { fetchMarketSession } from "../server/marketHours.js";
-import { UNIVERSE_SYMBOLS } from "../server/universe.js";
+import { UNIVERSE_SYMBOLS as BASE_UNIVERSE_SYMBOLS } from "../server/universe.js";
+import { EXTRA_UNIVERSE_SECTORS, EXTRA_UNIVERSE_SYMBOLS } from "../server/universeExtra.js";
+import { SECTORS } from "../server/pairsTrading.js";
 import { LAB_COST_PCT_PER_SIDE } from "../server/costs.js";
+
+// EXP_EXTRA_UNIVERSE=1 allarga l'universo da 40 a 80 titoli (server/universeExtra.ts) — solo per
+// misurare se più titoli per settore danno più segnali al pairs. Con questo flag i numeri di ORB
+// e VWAP NON sono confrontabili con la produzione (operano anch'essi sui titoli in più): leggere
+// solo il pairs. I dati giornalieri dei titoli extra arrivano da Alpaca in memoria (nessuna
+// scrittura sul DB di produzione), quelli intraday dallo stesso fetch degli altri.
+const EXP_EXTRA_UNIVERSE = process.env.EXP_EXTRA_UNIVERSE === "1";
+const UNIVERSE_SYMBOLS: string[] = EXP_EXTRA_UNIVERSE ? [...BASE_UNIVERSE_SYMBOLS, ...EXTRA_UNIVERSE_SYMBOLS] : BASE_UNIVERSE_SYMBOLS;
+const PAIRS_SECTORS: Record<string, string> = EXP_EXTRA_UNIVERSE ? { ...SECTORS, ...EXTRA_UNIVERSE_SECTORS } : SECTORS;
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
   computeATRPct,
@@ -105,6 +116,23 @@ if (EXP_PAIRS_DELAY_MIN > 0) console.log(`EXP_PAIRS_DELAY_MIN=${EXP_PAIRS_DELAY_
 // backtest e produzione mai notata. Il limite SQL è ora 250 per poter testare finestre fino a 180.
 const EXP_DAILY_LOOKBACK = process.env.EXP_DAILY_LOOKBACK ? Number(process.env.EXP_DAILY_LOOKBACK) : 120;
 if (process.env.EXP_DAILY_LOOKBACK) console.log(`EXP_DAILY_LOOKBACK=${EXP_DAILY_LOOKBACK}`);
+
+// Soglie e pool del pairs (11/10/2026; nessuna è attiva in produzione, mai sottoposte ad A/B prima):
+// EXP_PAIRS_ENTRY_Z (default 2,0), EXP_PAIRS_EXIT_Z (default 0,3), EXP_PAIRS_STOP_Z (default 3,5);
+// EXP_PAIRS_CANDIDATES=N allarga il POOL di coppie candidate (default MAX_PAIRS=10, cioè solo le 10
+// più correlate non sovrapposte — su 40 titoli, metà dell'universo non è mai in nessuna coppia)
+// senza alzare il tetto di posizioni aperte né la size per coppia (CAPITAL/MAX_PAIRS).
+const numEnv = (k: string): number | null => (process.env[k] ? Number(process.env[k]) : null);
+const EXP_PAIRS_ENTRY_Z = numEnv("EXP_PAIRS_ENTRY_Z");
+const EXP_PAIRS_EXIT_Z = numEnv("EXP_PAIRS_EXIT_Z");
+const EXP_PAIRS_STOP_Z = numEnv("EXP_PAIRS_STOP_Z");
+const EXP_PAIRS_CANDIDATES = numEnv("EXP_PAIRS_CANDIDATES");
+if (EXP_PAIRS_ENTRY_Z != null || EXP_PAIRS_EXIT_Z != null || EXP_PAIRS_STOP_Z != null || EXP_PAIRS_CANDIDATES != null) {
+  console.log(
+    `PAIRS override: entry_z=${EXP_PAIRS_ENTRY_Z ?? "2.0"} exit_z=${EXP_PAIRS_EXIT_Z ?? "0.3"} stop_z=${EXP_PAIRS_STOP_Z ?? "3.5"} candidati=${EXP_PAIRS_CANDIDATES ?? "10"}`
+  );
+}
+if (EXP_EXTRA_UNIVERSE) console.log(`UNIVERSO ESTESO: ${UNIVERSE_SYMBOLS.length} titoli (solo il pairs è confrontabile)`);
 
 // EXP_PAIRS_MAX_HOLD_DAYS=N chiude forzatamente una coppia (entrambe le gambe, a prescindere
 // dal P&L) se resta aperta da almeno N sedute senza che lo z-score sia mai rientrato — ipotesi
@@ -298,9 +326,31 @@ function sessionVWAP(bars: AlpacaIntradayBarRaw[]): number | null {
   return bars.reduce((s, b) => s + b.vw * b.v, 0) / totalVol;
 }
 
+/** Barre giornaliere dei titoli extra (solo EXP_EXTRA_UNIVERSE), scaricate una volta da Alpaca e tenute in memoria. */
+let extraDailyCache: Record<string, OrbDailyBar[]> | null = null;
+async function loadExtraDaily(): Promise<Record<string, OrbDailyBar[]>> {
+  if (extraDailyCache) return extraDailyCache;
+  const merged = await fetchPaginated<{ t: string; o: number; h: number; l: number; c: number }>(
+    `/v2/stocks/bars?symbols=${encodeURIComponent(EXTRA_UNIVERSE_SYMBOLS.join(","))}&timeframe=1Day&limit=10000&feed=iex&sort=asc&start=2025-01-01T00:00:00Z`
+  );
+  const out: Record<string, OrbDailyBar[]> = {};
+  for (const s of EXTRA_UNIVERSE_SYMBOLS) {
+    out[s] = (merged[s] ?? []).map((b) => ({ t: b.t.slice(0, 10), o: b.o, h: b.h, l: b.l, c: b.c }));
+  }
+  const missing = EXTRA_UNIVERSE_SYMBOLS.filter((s) => out[s].length === 0);
+  if (missing.length > 0) console.warn(`Titoli extra senza barre giornaliere (esclusi dalle coppie): ${missing.join(", ")}`);
+  extraDailyCache = out;
+  return out;
+}
+
 async function loadDailyClosesBeforeDate(beforeDateIso: string): Promise<Record<string, OrbDailyBar[]>> {
   const out: Record<string, OrbDailyBar[]> = {};
+  const extra = EXP_EXTRA_UNIVERSE ? await loadExtraDaily() : null;
   for (const symbol of UNIVERSE_SYMBOLS) {
+    if (extra && symbol in extra) {
+      out[symbol] = extra[symbol].filter((b) => b.t < beforeDateIso).slice(-250);
+      continue;
+    }
     const rows = (await sql.query(
       `SELECT trading_date, open, high, low, close FROM daily_bars
        WHERE symbol = $1 AND trading_date < $2 ORDER BY trading_date DESC LIMIT 250`,
@@ -421,7 +471,10 @@ async function run() {
     }
     if (Object.keys(orbAtr).length === 0) flag(`[${day}] ATR non calcolabile per nessun simbolo (storico daily insufficiente prima di questa data)`);
 
-    let pairStats: PairStats[] = selectPairs(closesBySymbol);
+    let pairStats: PairStats[] = selectPairs(closesBySymbol, {
+      maxPairs: EXP_PAIRS_CANDIDATES ?? undefined,
+      sectors: PAIRS_SECTORS,
+    });
     const openPairKeysAtStart = new Set(pairsOpen.map((l) => l.pairKey));
     for (const key of openPairKeysAtStart) {
       if (pairStats.some((p) => pairKey(p.a, p.b) === key)) continue;
@@ -491,7 +544,7 @@ async function run() {
       const pairStatsByKey: Record<string, PairStats> = {};
       for (const p of pairStats) pairStatsByKey[pairKey(p.a, p.b)] = p;
       try {
-        pairsExits = decidePairsExits(pairsOpen, prices, pairStatsByKey);
+        pairsExits = decidePairsExits(pairsOpen, prices, pairStatsByKey, EXP_PAIRS_EXIT_Z ?? undefined, EXP_PAIRS_STOP_Z ?? undefined);
       } catch (e) {
         flag(`[${day} ${timeIso}] eccezione in decidePairsExits: ${(e as Error).message}`);
       }
@@ -642,7 +695,7 @@ async function run() {
         try {
           const minutesFromOpen = (now.getTime() - openMs) / 60_000;
           if (minutesFromOpen >= EXP_PAIRS_DELAY_MIN) {
-            pairsEntries = decidePairsEntries(pairStats, pairsExcludedKeys, prices, MAX_PAIRS - pairsStillOpenKeys.size);
+            pairsEntries = decidePairsEntries(pairStats, pairsExcludedKeys, prices, MAX_PAIRS - pairsStillOpenKeys.size, EXP_PAIRS_ENTRY_Z ?? undefined);
           }
         } catch (e) {
           flag(`[${day} ${timeIso}] eccezione in decidePairsEntries: ${(e as Error).message}`);
