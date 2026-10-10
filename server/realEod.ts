@@ -27,6 +27,7 @@ import { fetchMarketSession } from "./marketHours.js";
 import { CAPITAL } from "./pairsTrading.js";
 import { todayResultFor, STRATEGY_IDS } from "./debrief.js";
 import { computeEligibility } from "./strategyAllocation.js";
+import { findOrphanLegIds } from "./realSymbols.js";
 
 export interface AlpacaEodPosition {
   symbol: string;
@@ -35,8 +36,30 @@ export interface AlpacaEodPosition {
 }
 
 export interface RealEodOpenRow {
+  id: number;
   symbol: string;
   pair_key: string | null;
+  side: "LONG" | "SHORT";
+  qty: number;
+  entry_price: number;
+}
+
+/**
+ * Un'operazione di chiusura EOD su un simbolo. Il conto Alpaca ha UNA posizione netta per
+ * titolo, condivisa da tutte le strategie: se sullo stesso simbolo ci sono anche gambe di una
+ * coppia, NON si può chiudere l'intera posizione (era il bug dell'8/10/2026: 22 azioni AVGO
+ * vendute, 6 delle quali erano la gamba del pairs) — si invia un ordine parziale per la sola
+ * quantità delle righe singole e si marcano chiuse solo quelle.
+ */
+export interface RealEodClosePlan {
+  position: AlpacaEodPosition;
+  /** Righe real_positions da marcare chiuse con questa operazione (vuoto = posizione senza righe). */
+  rows: RealEodOpenRow[];
+  /** true = DELETE dell'intera posizione broker; false = ordine a mercato parziale. */
+  whole: boolean;
+  /** Solo se whole = false: lato e quantità (azioni) dell'ordine parziale; qty 0 = nessun ordine. */
+  orderSide?: "buy" | "sell";
+  orderQty?: number;
 }
 
 interface AlpacaOrder {
@@ -63,30 +86,44 @@ async function cancelOpenOrders(symbol: string): Promise<void> {
   }
 }
 
-/** Chiude la posizione sul broker e registra l'uscita nelle righe real_positions aperte per quel simbolo. */
-async function closeAndRecord(p: AlpacaEodPosition): Promise<void> {
+/**
+ * Esegue un'operazione di chiusura EOD sul broker e registra l'uscita SOLO nelle righe del
+ * piano (mai in tutte le righe aperte del simbolo: potrebbero includere gambe di coppie).
+ */
+async function closeAndRecord(plan: RealEodClosePlan): Promise<void> {
+  const p = plan.position;
   await cancelOpenOrders(p.symbol);
-  const order = await alpacaFetch<AlpacaOrder>(`/v2/positions/${encodeURIComponent(p.symbol)}`, { method: "DELETE" });
 
-  let exitPrice = order.filled_avg_price ? Number(order.filled_avg_price) : null;
-  for (let i = 0; i < 3 && exitPrice == null; i++) {
-    await sleep(500);
-    const check = await alpacaFetch<AlpacaOrder>(`/v2/orders/${order.id}`);
-    if (check.filled_avg_price) exitPrice = Number(check.filled_avg_price);
+  let orderId: string | null = null;
+  let price: number;
+  if (plan.whole || (plan.orderQty ?? 0) > 0) {
+    const order = plan.whole
+      ? await alpacaFetch<AlpacaOrder>(`/v2/positions/${encodeURIComponent(p.symbol)}`, { method: "DELETE" })
+      : await alpacaFetch<AlpacaOrder>("/v2/orders", {
+          method: "POST",
+          body: JSON.stringify({ symbol: p.symbol, side: plan.orderSide, qty: plan.orderQty, type: "market", time_in_force: "day" }),
+        });
+    orderId = order.id;
+    let exitPrice = order.filled_avg_price ? Number(order.filled_avg_price) : null;
+    for (let i = 0; i < 3 && exitPrice == null; i++) {
+      await sleep(500);
+      const check = await alpacaFetch<AlpacaOrder>(`/v2/orders/${order.id}`);
+      if (check.filled_avg_price) exitPrice = Number(check.filled_avg_price);
+    }
+    price = exitPrice ?? Number(p.current_price);
+  } else {
+    // Le righe singole si compensano tra loro (net 0) e restano solo gambe di coppia: nessun
+    // ordine da inviare, si registra la chiusura contabile al prezzo corrente.
+    price = Number(p.current_price);
   }
-  const price = exitPrice ?? Number(p.current_price);
 
-  const rows = (await db()`
-    SELECT id, side, qty::float8 AS qty, entry_price::float8 AS entry_price
-    FROM real_positions WHERE symbol = ${p.symbol} AND status = 'open'
-  `) as unknown as { id: number; side: "LONG" | "SHORT"; qty: number; entry_price: number }[];
-  for (const r of rows) {
+  for (const r of plan.rows) {
     const dir = r.side === "LONG" ? 1 : -1;
     const realizedPnl = Math.round(r.qty * (price - r.entry_price) * dir);
     await db()`
       UPDATE real_positions
       SET status = 'closed', exit_price = ${price}, exit_time = now(), realized_pnl = ${realizedPnl},
-          exit_reason = 'eod', broker_exit_order_id = ${order.id}
+          exit_reason = ${r.pair_key ? "orphan_leg" : "eod"}, broker_exit_order_id = ${orderId}
       WHERE id = ${r.id}
     `;
   }
@@ -108,21 +145,40 @@ async function closeAndRecord(p: AlpacaEodPosition): Promise<void> {
  * nettamente l'altra — vedi CLAUDE.md "Backtest approfondito, 1/10/2026". Una posizione Alpaca
  * senza riga corrispondente in real_positions (non dovrebbe succedere) resta sulla vecchia
  * regola prudente "chiudi solo se in utile".
+ *
+ * Dal 10/10/2026 il piano è per QUANTITÀ, non per simbolo (vedi RealEodClosePlan): se sul
+ * simbolo ci sono anche gambe di una coppia, si chiude solo la parte delle righe singole. Una
+ * gamba di coppia rimasta SOLA (l'altra chiusa o mai aperta) è un'esposizione non coperta che
+ * la strategia non accetta: a fine giornata si chiude anch'essa (exit_reason "orphan_leg"),
+ * come rete di sicurezza di realExecution.ts che la chiude già a ogni tick.
  */
-export function decideRealEodCloses(positions: AlpacaEodPosition[], openRows: RealEodOpenRow[]): AlpacaEodPosition[] {
-  const rowBySymbol = new Map(openRows.map((r) => [r.symbol, r]));
-
-  const symbolsToClose = new Set<string>();
-  for (const p of positions) {
-    const row = rowBySymbol.get(p.symbol);
-    if (!row) {
-      if (Number(p.unrealized_pl) > 0) symbolsToClose.add(p.symbol);
-      continue;
-    }
-    if (!row.pair_key) symbolsToClose.add(p.symbol);
+export function decideRealEodCloses(positions: AlpacaEodPosition[], openRows: RealEodOpenRow[]): RealEodClosePlan[] {
+  const orphanIds = findOrphanLegIds(openRows);
+  const rowsBySymbol = new Map<string, RealEodOpenRow[]>();
+  for (const r of openRows) {
+    if (!rowsBySymbol.has(r.symbol)) rowsBySymbol.set(r.symbol, []);
+    rowsBySymbol.get(r.symbol)!.push(r);
   }
 
-  return positions.filter((p) => symbolsToClose.has(p.symbol));
+  const plans: RealEodClosePlan[] = [];
+  for (const p of positions) {
+    const rows = rowsBySymbol.get(p.symbol) ?? [];
+    if (rows.length === 0) {
+      if (Number(p.unrealized_pl) > 0) plans.push({ position: p, rows: [], whole: true });
+      continue;
+    }
+    // Da chiudere: singole (nessun pair_key) e gambe orfane. Le gambe di coppie complete restano.
+    const closing = rows.filter((r) => !r.pair_key || orphanIds.has(r.id));
+    if (closing.length === 0) continue;
+    const staying = rows.length - closing.length;
+    if (staying === 0) {
+      plans.push({ position: p, rows: closing, whole: true });
+      continue;
+    }
+    const net = closing.reduce((s, r) => s + (r.side === "LONG" ? r.qty : -r.qty), 0);
+    plans.push({ position: p, rows: closing, whole: false, orderSide: net > 0 ? "sell" : "buy", orderQty: Math.abs(net) });
+  }
+  return plans;
 }
 
 export interface RealEodCloseSummary {
@@ -177,16 +233,19 @@ export async function runRealEodClose(): Promise<RealEodCloseSummary> {
 
   const positions = await alpacaFetch<AlpacaEodPosition[]>("/v2/positions");
   const openRows = (await db()`
-    SELECT symbol, pair_key FROM real_positions WHERE status = 'open'
+    SELECT id, symbol, pair_key, side, qty::float8 AS qty, entry_price::float8 AS entry_price
+    FROM real_positions WHERE status = 'open'
   `) as unknown as RealEodOpenRow[];
   const toClose = decideRealEodCloses(positions, openRows);
 
-  const results = await Promise.allSettled(toClose.map((p) => closeAndRecord(p)));
+  const results = await Promise.allSettled(toClose.map((plan) => closeAndRecord(plan)));
   const closed = results.filter((r) => r.status === "fulfilled").length;
   const failed = results.length - closed;
-  const errors = results.flatMap((r, i) => (r.status === "rejected" ? [`${toClose[i].symbol}: ${(r.reason as Error).message}`] : []));
+  const errors = results.flatMap((r, i) =>
+    r.status === "rejected" ? [`${toClose[i].position.symbol}: ${(r.reason as Error).message}`] : []
+  );
 
-  return { evaluated: positions.length, closed, failed, errors, symbols: toClose.map((p) => p.symbol) };
+  return { evaluated: positions.length, closed, failed, errors, symbols: toClose.map((plan) => plan.position.symbol) };
 }
 
 /**

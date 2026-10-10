@@ -21,6 +21,7 @@ import { alpacaFetch, requireCredentials } from "./alpaca.js";
 import { db } from "./db.js";
 import { computeEligibility, computeWeights } from "./strategyAllocation.js";
 import { sizeByConviction, type SizingCandidate } from "./realSizing.js";
+import { findOrphanLegIds, occupiedSymbols } from "./realSymbols.js";
 import { UNIVERSE_SYMBOLS } from "./universe.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
@@ -316,8 +317,9 @@ async function recordBrokerClose(params: {
 async function reconcileOrbBrokerCloses(
   openPositions: OrbOpenPosition[],
   now: Date
-): Promise<{ stillOpen: OrbOpenPosition[]; reconciledCount: number }> {
+): Promise<{ stillOpen: OrbOpenPosition[]; reconciledCount: number; closedIds: number[] }> {
   const stillOpen: OrbOpenPosition[] = [];
+  const closedIds: number[] = [];
   let reconciledCount = 0;
   for (const pos of openPositions) {
     const qty = await fetchOpenPositionQty(pos.symbol);
@@ -341,9 +343,10 @@ async function reconcileOrbBrokerCloses(
       brokerOrderId: fill.id,
       now,
     });
+    closedIds.push(pos.id);
     reconciledCount++;
   }
-  return { stillOpen, reconciledCount };
+  return { stillOpen, reconciledCount, closedIds };
 }
 
 /** breakoutStrength di orb.ts, ricalcolato qui (mai esposto dal decideEntries di orb.ts): distanza dal bordo del range rotto, in % dell'ampiezza del range. */
@@ -389,7 +392,15 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
   // Riconciliazione ORB: prima di controllare stop/target a prezzo, verifica se un bracket
   // order ha già chiuso una posizione sul broker tra un tick e l'altro (protezione in tempo
   // reale). Le posizioni già chiuse così non entrano più in decideOrbExits, niente doppio ordine.
-  const { stillOpen: orbOpenReconciled, reconciledCount: orbReconciledCloses } = await reconcileOrbBrokerCloses(orbOpen, ctx.now);
+  const {
+    stillOpen: orbOpenReconciled,
+    reconciledCount: orbReconciledCloses,
+    closedIds: orbReconciledIds,
+  } = await reconcileOrbBrokerCloses(orbOpen, ctx.now);
+
+  // Id delle righe chiuse in questo tick (uscite normali, riconciliazione bracket, gambe orfane):
+  // servono a calcolare i simboli ancora occupati prima di aprire nuovi ingressi.
+  const closedIds = new Set<number>(orbReconciledIds);
 
   // --- Uscite: per ogni strategia con posizioni reali aperte, non solo quella scelta oggi ---
   const vwapExits = decideVwapExits(vwapOpen, ctx.vwapSnapshots, ctx.now);
@@ -408,6 +419,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
       reason: exit.reason,
       now: ctx.now,
     });
+    closedIds.add(exit.position.id);
     exitCount++;
   }
   for (const exit of orbExits) {
@@ -421,6 +433,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
       reason: exit.reason,
       now: ctx.now,
     });
+    closedIds.add(exit.position.id);
     exitCount++;
   }
   for (const exit of pairsExits) {
@@ -438,9 +451,39 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         reason: exit.reason,
         now: ctx.now,
       });
+      closedIds.add(leg.id);
       exitCount++;
     }
   }
+
+  // --- Gambe orfane: una gamba di coppia rimasta sola (l'altra chiusa fuori strategia o mai
+  // aperta) è esposizione non coperta — decidePairsExits la ignora per costruzione ("non si
+  // tocca alla cieca"), quindi senza questo blocco resterebbe aperta per sempre (TXN short,
+  // 8-10/10/2026). Si chiude a mercato, motivo "orphan_leg". Le gambe già chiuse in questo tick
+  // non contano come aperte: una coppia appena uscita per z-score non è un'orfana.
+  const pairRowsStillOpen = ctx.openRows.filter((r) => r.pair_key && !closedIds.has(r.id));
+  const orphanIds = findOrphanLegIds(pairRowsStillOpen);
+  for (const row of pairRowsStillOpen) {
+    if (!orphanIds.has(row.id)) continue;
+    await closeRealPosition({
+      id: row.id,
+      symbol: row.symbol,
+      side: row.side,
+      qty: row.qty,
+      entryPrice: row.entry_price,
+      fallbackPrice: ctx.prices[row.symbol] ?? row.entry_price,
+      reason: "orphan_leg",
+      now: ctx.now,
+    });
+    closedIds.add(row.id);
+    exitCount++;
+  }
+
+  // Un titolo = una strategia alla volta: sul conto reale c'è una sola posizione netta per
+  // simbolo, condivisa da tutte (vedi server/realSymbols.ts). Nessun ingresso su un titolo
+  // tenuto da un'altra strategia — gambe pairs comprese; aggiornato a ogni ingresso aperto,
+  // così due strategie non scelgono lo stesso titolo nello stesso tick.
+  const occupied = occupiedSymbols(ctx.openRows, closedIds);
 
   // --- Ingressi: per ogni strategia ammessa oggi (peso > 0), solo se non siamo a ridosso della chiusura ---
   let entryCount = 0;
@@ -466,7 +509,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         const freeSlots = VWAP_MAX_POSITIONS - stillOpen.size;
         // ctx.vwapTrend disponibile ma NON passato qui apposta — stesso interruttore spento di
         // api/cron/tick.ts, vedi il commento lì.
-        const rawCandidates = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
+        const rawCandidates = decideVwapEntries(UNIVERSE_SYMBOLS, occupied, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
         const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
         const sizingInput: SizingCandidate[] = candidates.map((c) => ({ symbol: c.symbol, price: c.entryPrice, conviction: Math.abs(c.distancePct) }));
         const sized = sizeByConviction(sizingInput, vwapCapital, VWAP_MAX_POSITIONS);
@@ -485,6 +528,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
             pairKeyVal: null,
             now: ctx.now,
           });
+          occupied.add(c.symbol);
           entryCount++;
         }
       }
@@ -503,7 +547,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
           const avgVol = volumes.reduce((s, v) => s + v, 0) / volumes.length;
           inputs[symbol] = { price, openingRange: range, atrPct: atr, avgBarVolume: avgVol, latestBarVolume: volumes[volumes.length - 1] };
         }
-        const rawCandidates = decideOrbEntries(UNIVERSE_SYMBOLS, stillOpen, inputs, freeSlots);
+        const rawCandidates = decideOrbEntries(UNIVERSE_SYMBOLS, occupied, inputs, freeSlots);
         const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
         const sizingInput: SizingCandidate[] = candidates.map((c) => {
           const range = ctx.openingRanges[c.symbol];
@@ -527,6 +571,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
             pairKeyVal: null,
             now: ctx.now,
           });
+          occupied.add(c.symbol);
           entryCount++;
         }
       }
@@ -536,7 +581,10 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         const stillOpenKeys = new Set(pairsOpen.filter((leg) => !pairsExits.some((e) => e.legIds.includes(leg.id))).map((leg) => leg.pairKey));
         const freeSlots = MAX_PAIRS - stillOpenKeys.size;
         const pairsExcludedKeys = new Set([...stillOpenKeys, ...ctx.stoppedPairsToday]);
-        const rawCandidates = decidePairsEntries(ctx.pairStats, pairsExcludedKeys, ctx.prices, freeSlots);
+        // Una coppia è candidata solo se ENTRAMBI i titoli sono liberi sul conto (nessuna altra
+        // strategia, né un'altra coppia, li tiene già).
+        const freePairStats = ctx.pairStats.filter((p) => !occupied.has(p.a) && !occupied.has(p.b));
+        const rawCandidates = decidePairsEntries(freePairStats, pairsExcludedKeys, ctx.prices, freeSlots);
         const candidates = await filterShortableCandidates(rawCandidates, (c) => c.legs);
         // Una coppia = un candidato di sizing, prezzo fittizio 1 -> la qty restituita è
         // direttamente il budget in dollari per la coppia, diviso poi a metà tra le due gambe
@@ -562,6 +610,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
               pairKeyVal: c.pairKey,
               now: ctx.now,
             });
+            occupied.add(leg.symbol);
             entryCount++;
           }
         }
