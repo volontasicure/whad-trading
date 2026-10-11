@@ -256,6 +256,14 @@ const tradeStats: Record<StratKey, { n: number; wins: number; sumWinNet: number;
 const dailyTurnover: Record<StratKey, number[]> = { orb: [], vwap: [], pairs: [] };
 const dailyTrades: Record<StratKey, number[]> = { orb: [], vwap: [], pairs: [] };
 const sessionDates: string[] = [];
+// Valore di mercato delle coppie aperte (escursione NON realizzata), 11/10/2026: le serie giornaliere
+// di P&L realizzato non mostrano quanto una coppia tenuta a lungo va in perdita prima di rientrare —
+// il limite principale di uno stop largo. Per coppia: peggior P&L non realizzato dall'ingresso (MAE)
+// e P&L finale; per seduta: non realizzato a fine giornata e peggiore intragiornaliero (solo pairs).
+const pairMae = new Map<string, number>();
+const pairsMaeList: { mae: number; pnl: number; open?: boolean }[] = [];
+const dailyEndUnreal: number[] = [];
+const dailyMinUnreal: number[] = [];
 function recordTrade(strat: StratKey, pnl: number, turnover: number) {
   const net = pnl - BACKTEST_COST_PCT * turnover;
   const s = tradeStats[strat];
@@ -361,22 +369,44 @@ async function loadExtraDaily(): Promise<Record<string, OrbDailyBar[]>> {
   return out;
 }
 
+/**
+ * Tutte le barre giornaliere dei titoli di base, UNA query per run (e, con BACKTEST_CACHE_DIR, nessuna
+ * query se il file su disco esiste). Prima: 40 query per OGNI seduta rigiocata, ciascuna con fino a 250
+ * righe — centinaia di migliaia di query e diversi GB di trasferimento su ~150 run dell'11/10/2026,
+ * che hanno esaurito la quota del progetto Neon (HTTP 402), lo STESSO database della produzione.
+ */
+let dailyAllCache: Record<string, OrbDailyBar[]> | null = null;
+async function loadAllDailyOnce(): Promise<Record<string, OrbDailyBar[]>> {
+  if (dailyAllCache) return dailyAllCache;
+  const cacheDir = process.env.BACKTEST_CACHE_DIR;
+  const file = cacheDir ? path.join(cacheDir, "daily_bars_all.json") : null;
+  if (file && existsSync(file)) {
+    dailyAllCache = JSON.parse(readFileSync(file, "utf8")) as Record<string, OrbDailyBar[]>;
+    return dailyAllCache;
+  }
+  const rows = (await sql.query(
+    `SELECT symbol, to_char(trading_date, 'YYYY-MM-DD') AS d, open, high, low, close
+     FROM daily_bars WHERE symbol = ANY($1::text[]) ORDER BY symbol, trading_date`,
+    [BASE_UNIVERSE_SYMBOLS]
+  )) as { symbol: string; d: string; open: string; high: string; low: string; close: string }[];
+  const out: Record<string, OrbDailyBar[]> = {};
+  for (const s of BASE_UNIVERSE_SYMBOLS) out[s] = [];
+  for (const r of rows) out[r.symbol].push({ t: r.d, o: Number(r.open), h: Number(r.high), l: Number(r.low), c: Number(r.close) });
+  if (file) {
+    mkdirSync(cacheDir!, { recursive: true });
+    writeFileSync(file, JSON.stringify(out));
+  }
+  dailyAllCache = out;
+  return out;
+}
+
 async function loadDailyClosesBeforeDate(beforeDateIso: string): Promise<Record<string, OrbDailyBar[]>> {
   const out: Record<string, OrbDailyBar[]> = {};
   const extra = EXP_EXTRA_UNIVERSE ? await loadExtraDaily() : null;
+  const all = await loadAllDailyOnce();
   for (const symbol of UNIVERSE_SYMBOLS) {
-    if (extra && symbol in extra) {
-      out[symbol] = extra[symbol].filter((b) => b.t < beforeDateIso).slice(-250);
-      continue;
-    }
-    const rows = (await sql.query(
-      `SELECT trading_date, open, high, low, close FROM daily_bars
-       WHERE symbol = $1 AND trading_date < $2 ORDER BY trading_date DESC LIMIT 250`,
-      [symbol, beforeDateIso]
-    )) as { trading_date: string; open: string; high: string; low: string; close: string }[];
-    out[symbol] = rows
-      .reverse()
-      .map((r) => ({ t: r.trading_date, o: Number(r.open), h: Number(r.high), l: Number(r.low), c: Number(r.close) }));
+    const source = extra && symbol in extra ? extra[symbol] : all[symbol] ?? [];
+    out[symbol] = source.filter((b) => b.t < beforeDateIso).slice(-250);
   }
   return out;
 }
@@ -510,6 +540,7 @@ async function run() {
     const closeMs = new Date(session.closeUtc).getTime();
     const stoppedPairsToday = new Set<string>(); // raffreddamento post-stop, azzerato a ogni giorno
     const pairMinAbsZToday = new Map<string, number>(); // per EXP_PAIRS_STALENESS_DAYS, azzerato a ogni giorno
+    let dayMinUnreal = 0; // peggior non realizzato pairs della giornata (tutte le coppie aperte insieme)
 
     for (const timeIso of times) {
       const now = new Date(timeIso);
@@ -612,6 +643,8 @@ async function run() {
         }
         totals.pairs.turnover += pairTurnover;
         recordTrade("pairs", ex.realizedPnl, pairTurnover);
+        pairsMaeList.push({ mae: Math.min(pairMae.get(ex.pairKey) ?? 0, ex.realizedPnl), pnl: ex.realizedPnl });
+        pairMae.delete(ex.pairKey);
         totals.pairs.exits++;
         dayCounters.pairsExits++;
         totals.pairs.exitReasons[ex.reason] = (totals.pairs.exitReasons[ex.reason] ?? 0) + 1;
@@ -728,6 +761,21 @@ async function run() {
           totals.pairs.entries += e.legs.length;
           dayCounters.pairsEntries += e.legs.length;
         }
+      }
+
+      // Non realizzato delle coppie aperte a fine passo (le entrate di questo passo valgono ~0).
+      {
+        const unrealByPair = new Map<string, number>();
+        let unrealTotal = 0;
+        for (const l of pairsOpen) {
+          const px = prices[l.symbol];
+          if (px == null) continue;
+          const u = l.qty * (px - l.entryPrice) * (l.side === "LONG" ? 1 : -1);
+          unrealByPair.set(l.pairKey, (unrealByPair.get(l.pairKey) ?? 0) + u);
+          unrealTotal += u;
+        }
+        for (const [k, u] of unrealByPair) pairMae.set(k, Math.min(pairMae.get(k) ?? 0, u));
+        dayMinUnreal = Math.min(dayMinUnreal, unrealTotal);
       }
 
       // Controlli di sanità a ogni passo
@@ -872,6 +920,14 @@ async function run() {
       dailyTrades[k].push(tradeStats[k].n - tradesBefore[k]);
     }
     sessionDates.push(day);
+    let endUnreal = 0;
+    for (const l of pairsOpen) {
+      const px = lastPrices[l.symbol];
+      if (px == null) continue;
+      endUnreal += l.qty * (px - l.entryPrice) * (l.side === "LONG" ? 1 : -1);
+    }
+    dailyEndUnreal.push(endUnreal);
+    dailyMinUnreal.push(Math.min(dayMinUnreal, endUnreal));
 
     console.log(
       `[${day}] orb: ${dayCounters.orbEntries} entrate/${dayCounters.orbExits} uscite | ` +
@@ -924,6 +980,7 @@ async function run() {
   if (anomalies.length === 0) console.log("Nessuna anomalia rilevata sui giorni testati.");
 
   if (process.env.BACKTEST_JSON) {
+    for (const [, mae] of pairMae) pairsMaeList.push({ mae, pnl: 0, open: true }); // ancora aperte a fine finestra
     const out = {
       generatedAt: new Date().toISOString(),
       costPctPerSide: BACKTEST_COST_PCT,
@@ -936,6 +993,7 @@ async function run() {
             dailyTurnover: dailyTurnover[k],
             dailyTrades: dailyTrades[k],
             trades: tradeStats[k],
+            ...(k === "pairs" ? { mtm: { dailyEndUnreal, dailyMinUnreal, mae: pairsMaeList } } : {}),
           },
         ])
       ),
