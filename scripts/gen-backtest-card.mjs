@@ -43,8 +43,10 @@ function card(key) {
     sharpe: sd > 0 ? Number(((mean / sd) * Math.sqrt(252)).toFixed(2)) : 0,
     winRate: t.n > 0 ? Number((t.wins / t.n).toFixed(3)) : 0,
     tradesPerSession: Number((t.n / sessions).toFixed(1)),
+    trades: t.n,
     costs: Math.round(sum(costsDaily) / sessions),
-    profitFactor: t.sumLossNet > 0 ? Number((t.sumWinNet / t.sumLossNet).toFixed(2)) : 0,
+    // Nessuna perdita nel campione = rapporto indefinito (null), NON zero: "0,00" leggerebbe come pessimo.
+    profitFactor: t.sumLossNet > 0 ? Number((t.sumWinNet / t.sumLossNet).toFixed(2)) : null,
     dailyPnl: netDaily.slice(-20).map((x) => Math.round(x)),
   };
 }

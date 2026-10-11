@@ -80,7 +80,8 @@ export function StrategyView() {
                 <BacktestMetric k="WIN %" v={`${Math.round(sel.backtest.winRate * 100)}%`} />
                 <BacktestMetric k="OP. / SEDUTA" v={String(sel.backtest.tradesPerSession)} />
                 <BacktestMetric k="COSTI / SEDUTA" v={`−${sel.backtest.costs}`} color="var(--red-ink)" />
-                <BacktestMetric k="PROFIT FACTOR" v={dec(sel.backtest.profitFactor, 2)} />
+                <BacktestMetric k="PROFIT FACTOR" v={sel.backtest.profitFactor == null ? "n/d" : dec(sel.backtest.profitFactor, 2)} />
+                <BacktestMetric k="TRADE" v={String(sel.backtest.trades)} />
               </div>
             </div>
 

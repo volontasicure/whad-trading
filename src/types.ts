@@ -56,8 +56,11 @@ export interface Strategy {
     sharpe: number;
     winRate: number;
     tradesPerSession: number;
+    /** Round trip totali nella finestra di backtest (pairs: coppie complete) — il campione su cui poggiano le altre metriche. */
+    trades: number;
     costs: number;
-    profitFactor: number;
+    /** null = nessuna perdita nel campione (rapporto indefinito). */
+    profitFactor: number | null;
     /** 20 valori */
     dailyPnl: number[];
   };

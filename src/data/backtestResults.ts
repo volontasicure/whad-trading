@@ -1,25 +1,26 @@
 // GENERATO da scripts/gen-backtest-card.mjs — non modificare a mano.
 // Backtest storico reale (configurazione di produzione, costi di esecuzione dedotti), snapshot
-// del 2026-10-10: non si aggiorna da solo, va rigenerato dopo ogni modifica di strategia.
+// del 2026-10-11: non si aggiorna da solo, va rigenerato dopo ogni modifica di strategia.
 // "costs" è il costo medio PER SEDUTA, "tradesPerSession" i round trip chiusi per seduta
 // (pairs: coppie complete, non gambe), "dailyPnl" il netto delle ultime 20 sedute.
 
 export const BACKTEST_META = {
-  "sessions": 101,
-  "firstDay": "2026-05-18",
+  "sessions": 99,
+  "firstDay": "2026-05-20",
   "lastDay": "2026-10-09",
   "costPctPerSide": 0.00023,
-  "generatedAt": "2026-10-10"
+  "generatedAt": "2026-10-11"
 };
 
 export const BACKTEST_RESULTS = {
   "orb": {
     "net": -8850,
-    "sharpe": -3.58,
-    "winRate": 0.398,
+    "sharpe": -3.62,
+    "winRate": 0.399,
     "tradesPerSession": 9.7,
-    "costs": 73,
-    "profitFactor": 0.82,
+    "trades": 959,
+    "costs": 74,
+    "profitFactor": 0.81,
     "dailyPnl": [
       -141,
       259,
@@ -44,26 +45,27 @@ export const BACKTEST_RESULTS = {
     ]
   },
   "pairs": {
-    "net": 2227,
-    "sharpe": 1.97,
-    "winRate": 0.559,
-    "tradesPerSession": 0.3,
-    "costs": 2,
-    "profitFactor": 1.76,
+    "net": 4137,
+    "sharpe": 6,
+    "winRate": 1,
+    "tradesPerSession": 0.2,
+    "trades": 18,
+    "costs": 1,
+    "profitFactor": null,
     "dailyPnl": [
       0,
-      -216,
       0,
       0,
       0,
       0,
-      384,
+      0,
+      171,
       0,
       0,
       0,
       0,
-      323,
-      177,
+      54,
+      80,
       0,
       0,
       0,
@@ -74,12 +76,13 @@ export const BACKTEST_RESULTS = {
     ]
   },
   "vwap_reversion": {
-    "net": 492,
-    "sharpe": 0.56,
-    "winRate": 0.458,
+    "net": 440,
+    "sharpe": 0.51,
+    "winRate": 0.454,
     "tradesPerSession": 1.2,
+    "trades": 119,
     "costs": 7,
-    "profitFactor": 1.08,
+    "profitFactor": 1.07,
     "dailyPnl": [
       -59,
       83,

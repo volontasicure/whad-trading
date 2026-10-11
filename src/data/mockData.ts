@@ -142,7 +142,7 @@ export const STRATEGIES: Strategy[] = [
       { label: "Coppie attive", value: "10", hint: "una gamba long e una short per coppia" },
       { label: "Ingresso sullo spread", value: "±2,0σ", hint: "z-score del rapporto di prezzo sulle ultime ~120 chiusure giornaliere" },
       { label: "Uscita", value: "0,3σ", hint: "rientro verso la media dello spread" },
-      { label: "Stop sullo spread", value: "3,5σ", hint: "rottura della relazione tra i due titoli" },
+      { label: "Stop sullo spread", value: "4,5σ", hint: "rottura della relazione tra i due titoli" },
       { label: "Ricalcolo cointegrazione", value: "giornaliero", hint: "coppie riverificate prima dell'apertura" },
       { label: "Esposizione netta", value: "≈ 0%", hint: "capitale diviso a metà tra long e short" },
     ],
