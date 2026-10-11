@@ -24,7 +24,7 @@ export interface AllocationEntry {
   reason: string;
   sessionsAvailable: number;
   drawdownPct: number;
-  /** Media del netto lab sulle ultime 5 sedute (server/strategyAllocation.ts, RECENT_AVG_LOOKBACK_SESSIONS) — dal 29/9/2026 un valore sotto MIN_RECENT_AVG_NET esclude la strategia. */
+  /** Media del netto lab sulle ultime 5 sedute (server/strategyAllocation.ts, RECENT_AVG_LOOKBACK_SESSIONS) — solo diagnostica dall'11/10/2026 (non è più un gate: vedi REAL_CAPITAL_STRATEGIES). */
   recentAvgNet: number;
   /** 0 se non ammessa; altrimenti equal-weight tra le ammesse (sempre <= 1, la somma su tutte fa 1 se almeno una è ammessa). */
   weight: number;

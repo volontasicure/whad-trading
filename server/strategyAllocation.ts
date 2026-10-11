@@ -50,34 +50,32 @@ export const MAX_DRAWDOWN_PCT = 5.0;
 export const DRAWDOWN_LOOKBACK_SESSIONS = 20;
 
 /**
- * Media del netto giornaliero sulle ultime RECENT_AVG_LOOKBACK_SESSIONS sedute lab: se scende
- * sotto MIN_RECENT_AVG_NET, la strategia esce dall'allocazione reale finché non risale. Una
- * finestra corta (5, non 20 come il drawdown) per restare reattiva a un'inversione recente —
- * l'obiettivo è distinguere "negativa da settimane" da "si è appena ripresa", non solo
- * "negativa oggi". Scelta il 29/9/2026 guardando i dati di quel giorno (ORB media ultime 5
- * sedute −351$, VWAP +129$, pairs +4$) — non validata su una finestra storica indipendente,
- * a differenza della maggior parte delle altre decisioni di questo progetto: è un cambio di
- * struttura del portafoglio, non un parametro di segnale, e non c'è uno storico "cosa sarebbe
- * successo con questa regola" da rigiocare facilmente (stesso limite già accettato per
- * l'allocazione ripartita del 25/9). Rischio dichiarato di averla tarata sul risultato
- * desiderato più che su un principio indipendente — da rivedere con più dati.
+ * Strategie ammesse a ricevere capitale reale, dall'11/10/2026. Prima l'ammissione era un
+ * insieme di gate sul rendimento recente (media a 5 sedute dal 29/9, a 20 dall'11/10) applicati
+ * a tutte e tre; la validazione su 9 finestre indipendenti da ~100 sedute (~890 sedute, marzo
+ * 2023 → ottobre 2026, netto di costi, scripts/multiwindow-ab.mjs) ha mostrato che era la
+ * struttura sbagliata:
+ *  - pairs: positivo in 9/9 finestre (+25.061$ totale, lab 100k$);
+ *  - VWAP: −8.732$ (soglia 2,5%; −39.387$ a 1,2%), negativo in 5/9;
+ *  - ORB: −80.899$, negativa in 9/9.
+ * Allocare in modo equal-weight alle "ammesse" dai gate dimezzava il capitale del pairs per darne
+ * metà a strategie senza edge: gate attuale +3.758$ contro +22.646$ per "solo pairs", peggio in
+ * 9/9 finestre. E applicare le medie a 5/20 sedute al PAIRS stesso fa perdere soldi (20.832$
+ * contro 25.061$ senza, 159 sedute in cassa): fa pochi trade e il suo P&L non ha memoria, dopo
+ * uno stop le medie restano negative per settimane proprio mentre il segnale si riprende. Il
+ * drawdown picco-valle non è mai scattato sul pairs in 892 sedute: resta come interruttore.
+ * Le altre strategie continuano a girare nel lab per osservazione; per riammetterne una serve
+ * un'evidenza netta di costi su più finestre indipendenti, non una settimana buona.
  */
-export const MIN_RECENT_AVG_NET = 0;
-export const RECENT_AVG_LOOKBACK_SESSIONS = 5;
+export const REAL_CAPITAL_STRATEGIES: readonly string[] = ["pairs"];
 
 /**
- * Secondo orizzonte, dall'11/10/2026: la media a 5 sedute da sola riammette una strategia
- * negativa da mesi dopo una sola settimana fortunata — il 12/10 l'ORB (−8.850$ netto su 101
- * sedute, −13.254$ nella finestra precedente) sarebbe tornata al 50% del capitale reale per una
- * settimana lorda di +402$. Si richiede anche media ≥ 0 sulle ultime LONG_AVG_LOOKBACK_SESSIONS
- * sedute. Simulato sulle serie giornaliere di backtest (scripts/gate-sim.mjs, due finestre
- * indipendenti, netto di costi): gate attuale +1.472/+1.143, con la media a 20 sedute
- * +1.738/+1.581 — migliora su entrambe e porta le sedute con ORB ammessa da 18/9 a 3/0. Con la
- * media a 10 sedute il risultato è misto (peggio sulla finestra recente): l'orizzonte conta.
- * Differenze di poche centinaia di dollari su ~80 sedute: indizio coerente, non prova; 3
- * varianti provate sulle stesse serie (un po' di selezione a posteriori).
+ * Orizzonti delle medie diagnostiche `recentAvgNet` / `longAvgNet` (mostrate in UI/debrief).
+ * Non sono più gate: vedi REAL_CAPITAL_STRATEGIES. Storia: media a 5 sedute dal 29/9/2026
+ * (tarata sui dati di quel giorno), media a 20 dall'11/10 — quest'ultima aveva migliorato il gate
+ * a 5 in 7/9 finestre (+3.758$ contro +77$) ma restava ben sotto "solo pairs".
  */
-export const MIN_LONG_AVG_NET = 0;
+export const RECENT_AVG_LOOKBACK_SESSIONS = 5;
 export const LONG_AVG_LOOKBACK_SESSIONS = 20;
 
 export interface StrategyEligibility {
@@ -124,29 +122,26 @@ export async function computeEligibility(beforeDateIso: string): Promise<Strateg
     }
     const drawdownPct = (maxDrawdownDollars / LAB_CAPITAL_REF) * 100;
 
-    // Media mobile corta, ultime RECENT_AVG_LOOKBACK_SESSIONS sedute (indipendente dalla
-    // finestra del drawdown sopra).
+    // Medie diagnostiche (non più gate, vedi REAL_CAPITAL_STRATEGIES): ultime
+    // RECENT_AVG_LOOKBACK_SESSIONS sedute, indipendenti dalla finestra del drawdown sopra.
     const recentShort = rows.slice(-RECENT_AVG_LOOKBACK_SESSIONS);
     const recentAvgNet = recentShort.length > 0 ? recentShort.reduce((s, r) => s + r.net, 0) / recentShort.length : 0;
 
-    // Media lunga, ultime LONG_AVG_LOOKBACK_SESSIONS sedute (vedi la costante sopra).
+    // Media lunga, ultime LONG_AVG_LOOKBACK_SESSIONS sedute.
     const recentLong = rows.slice(-LONG_AVG_LOOKBACK_SESSIONS);
     const longAvgNet = recentLong.length > 0 ? recentLong.reduce((s, r) => s + r.net, 0) / recentLong.length : 0;
 
     let eligible = true;
     let reason = "ammessa";
-    if (sessionsAvailable < MIN_TRACK_RECORD_SESSIONS) {
+    if (!REAL_CAPITAL_STRATEGIES.includes(strategyId)) {
+      eligible = false;
+      reason = `fuori dal capitale reale: nessun edge netto di costi sui backtest (resta nel lab per osservazione)`;
+    } else if (sessionsAvailable < MIN_TRACK_RECORD_SESSIONS) {
       eligible = false;
       reason = `storico insufficiente (${sessionsAvailable}/${MIN_TRACK_RECORD_SESSIONS} sedute lab)`;
     } else if (drawdownPct > MAX_DRAWDOWN_PCT) {
       eligible = false;
       reason = `drawdown recente ${drawdownPct.toFixed(1)}% oltre la soglia ${MAX_DRAWDOWN_PCT}%`;
-    } else if (recentAvgNet < MIN_RECENT_AVG_NET) {
-      eligible = false;
-      reason = `media ultime ${RECENT_AVG_LOOKBACK_SESSIONS} sedute ${recentAvgNet.toFixed(0)}$, sotto soglia`;
-    } else if (longAvgNet < MIN_LONG_AVG_NET) {
-      eligible = false;
-      reason = `media ultime ${LONG_AVG_LOOKBACK_SESSIONS} sedute ${longAvgNet.toFixed(0)}$ sotto soglia (la media a ${RECENT_AVG_LOOKBACK_SESSIONS} è ${recentAvgNet.toFixed(0)}$)`;
     }
 
     out.push({ strategyId, eligible, reason, sessionsAvailable, drawdownPct, recentAvgNet, longAvgNet });

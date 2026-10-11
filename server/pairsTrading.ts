@@ -17,15 +17,19 @@ export const MAX_PAIRS = 10;
 export const CAPITAL = 100_000;
 export const ENTRY_Z = 2.0;
 export const EXIT_Z = 0.3;
-// 4,5 dal 11/10/2026 (era 3,5). Backtest su due finestre indipendenti (99/98 sedute, netto di
-// costi, recente | fuori campione): 3,0 → 3,5 → 4,0 → 4,5 = 114|2.128 → 2.286|2.541 →
-// 2.336|2.691 → 4.137|2.932, monotono; con 4,5 nessuno stop scatta più nella finestra recente
-// (le uscite a 3,5 tagliavano coppie che poi rientravano). Oltre 4,5 il backtest continua a
-// migliorare (5,0 e 6,0) ma lì si perde la valvola contro una rottura strutturale permanente,
-// mai osservata in ~200 sedute — 4,5 tiene gran parte del miglioramento. Misure solo sul
-// realizzato giornaliero (l'escursione non realizzata non è visibile); 18 trade nella finestra
-// recente. Vedi CLAUDE.md "Più segnali per il pairs".
-export const STOP_Z = 4.5;
+// 6,0 dall'11/10/2026 (era 3,5; 4,5 per poche ore). Validato su 9 finestre indipendenti da ~100
+// sedute (~890 sedute, marzo 2023 → ottobre 2026, incl. il ribasso 2022-23 e la crisi bancaria di
+// marzo 2023), netto di costi, totale lab 100k$: stop 3,5 → 4,5 → 5,0 → 6,0 → 7,0 → 9,0 =
+// 14.864 → 25.061 → 28.063 → 30.517 → 31.670 → 31.814. 4,5 batte 3,5 in 8/9 finestre; da 6,0 in
+// su il guadagno satura (+4% fino a 9,0) e il rischio di coda realizzato smette di migliorare
+// (peggior giorno −1.357 / −1.688 / −1.315 / −907 / −907 / −949, drawdown max 2,49% / 1,69% /
+// 1,32% / 0,91% / 0,91% / 0,95%): 6,0 è sul plateau, non su un bordo. Meccanismo: uscire a z
+// basso taglia coppie dello stesso settore che poi rientrano. Lo stop resta come valvola contro
+// una rottura strutturale permanente (fusione, fallimento) mai osservata nel campione — un
+// rapporto che si muove di 6 deviazioni standard tra due titoli dello stesso settore non è
+// rumore. Misure solo sul realizzato giornaliero (l'escursione non realizzata non è visibile).
+// Vedi CLAUDE.md "Validazione su 9 finestre".
+export const STOP_Z = 6.0;
 /** Finestra (sedute) del test di cointegrazione Engle-Granger — più corta del lookback di
  * correlazione/z-score (tutto lo storico disponibile) per restare sensibile a una rottura
  * recente, vedi server/cointegration.ts. */

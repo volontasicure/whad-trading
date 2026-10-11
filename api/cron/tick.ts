@@ -155,7 +155,7 @@ async function fetchDailyBars(days: number): Promise<Record<string, AlpacaDailyB
   const start = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const symbols = UNIVERSE_SYMBOLS.join(",");
   const merged = await fetchBarsPaginated<AlpacaDailyBarRaw>(
-    `/v2/stocks/bars?symbols=${encodeURIComponent(symbols)}&timeframe=1Day&limit=10000&feed=iex&sort=asc&start=${encodeURIComponent(start)}`
+    `/v2/stocks/bars?symbols=${encodeURIComponent(symbols)}&timeframe=1Day&limit=10000&feed=iex&adjustment=split,spin-off&sort=asc&start=${encodeURIComponent(start)}`
   );
   const out: Record<string, AlpacaDailyBarRaw[]> = {};
   for (const symbol of UNIVERSE_SYMBOLS) out[symbol] = merged[symbol] ?? [];
