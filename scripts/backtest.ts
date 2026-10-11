@@ -9,7 +9,7 @@
 // solo le barre a 5 minuti dei giorni da rigiocare (session_bars storico non esiste ancora,
 // il tick ha iniziato ad accumularlo solo da questa sessione in poi).
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { neon } from "@neondatabase/serverless";
 import { alpacaFetch, alpacaDataFetch } from "../server/alpaca.js";
@@ -118,7 +118,7 @@ const EXP_DAILY_LOOKBACK = process.env.EXP_DAILY_LOOKBACK ? Number(process.env.E
 if (process.env.EXP_DAILY_LOOKBACK) console.log(`EXP_DAILY_LOOKBACK=${EXP_DAILY_LOOKBACK}`);
 
 // Soglie e pool del pairs (11/10/2026; nessuna è attiva in produzione, mai sottoposte ad A/B prima):
-// EXP_PAIRS_ENTRY_Z (default 2,0), EXP_PAIRS_EXIT_Z (default 0,3), EXP_PAIRS_STOP_Z (default 4,5 dall'11/10/2026, era 3,5);
+// EXP_PAIRS_ENTRY_Z (default 2,0), EXP_PAIRS_EXIT_Z (default 0,3), EXP_PAIRS_STOP_Z (default 6,0 dall'11/10/2026, era 3,5);
 // EXP_PAIRS_CANDIDATES=N allarga il POOL di coppie candidate (default MAX_PAIRS=10, cioè solo le 10
 // più correlate non sovrapposte — su 40 titoli, metà dell'universo non è mai in nessuna coppia)
 // senza alzare il tetto di posizioni aperte né la size per coppia (CAPITAL/MAX_PAIRS).
@@ -129,7 +129,7 @@ const EXP_PAIRS_STOP_Z = numEnv("EXP_PAIRS_STOP_Z");
 const EXP_PAIRS_CANDIDATES = numEnv("EXP_PAIRS_CANDIDATES");
 if (EXP_PAIRS_ENTRY_Z != null || EXP_PAIRS_EXIT_Z != null || EXP_PAIRS_STOP_Z != null || EXP_PAIRS_CANDIDATES != null) {
   console.log(
-    `PAIRS override: entry_z=${EXP_PAIRS_ENTRY_Z ?? "2.0"} exit_z=${EXP_PAIRS_EXIT_Z ?? "0.3"} stop_z=${EXP_PAIRS_STOP_Z ?? "4.5"} candidati=${EXP_PAIRS_CANDIDATES ?? "10"}`
+    `PAIRS override: entry_z=${EXP_PAIRS_ENTRY_Z ?? "2.0"} exit_z=${EXP_PAIRS_EXIT_Z ?? "0.3"} stop_z=${EXP_PAIRS_STOP_Z ?? "6.0"} candidati=${EXP_PAIRS_CANDIDATES ?? "10"}`
   );
 }
 if (EXP_EXTRA_UNIVERSE) console.log(`UNIVERSO ESTESO: ${UNIVERSE_SYMBOLS.length} titoli (solo il pairs è confrontabile)`);
@@ -311,9 +311,27 @@ async function fetchPaginated<T>(basePath: string): Promise<Record<string, T[]>>
   return merged;
 }
 
+/** BACKTEST_CACHE_DIR: cache su disco delle barre intraday per seduta (stessa finestra rigiocata con più
+ *  configurazioni = un solo download). Chiave: intervallo + n. simboli + flag universo esteso. */
 async function fetchSessionBars(startUtc: string, endUtc: string): Promise<Record<string, AlpacaIntradayBarRaw[]>> {
+  const cacheDir = process.env.BACKTEST_CACHE_DIR;
+  const cacheFile = cacheDir
+    ? path.join(cacheDir, `${startUtc.replace(/[^0-9A-Za-z]/g, "")}_${endUtc.replace(/[^0-9A-Za-z]/g, "")}_${UNIVERSE_SYMBOLS.length}.json`)
+    : null;
+  if (cacheFile && existsSync(cacheFile)) {
+    return JSON.parse(readFileSync(cacheFile, "utf8")) as Record<string, AlpacaIntradayBarRaw[]>;
+  }
+  const out = await fetchSessionBarsUncached(startUtc, endUtc);
+  if (cacheFile) {
+    mkdirSync(cacheDir!, { recursive: true });
+    writeFileSync(cacheFile, JSON.stringify(out));
+  }
+  return out;
+}
+
+async function fetchSessionBarsUncached(startUtc: string, endUtc: string): Promise<Record<string, AlpacaIntradayBarRaw[]>> {
   const merged = await fetchPaginated<AlpacaIntradayBarRaw>(
-    `/v2/stocks/bars?symbols=${encodeURIComponent(UNIVERSE_SYMBOLS.join(","))}&timeframe=5Min&limit=3000&feed=iex&sort=asc&start=${encodeURIComponent(startUtc)}&end=${encodeURIComponent(endUtc)}`
+    `/v2/stocks/bars?symbols=${encodeURIComponent(UNIVERSE_SYMBOLS.join(","))}&timeframe=5Min&limit=3000&feed=iex&adjustment=split,spin-off&sort=asc&start=${encodeURIComponent(startUtc)}&end=${encodeURIComponent(endUtc)}`
   );
   const out: Record<string, AlpacaIntradayBarRaw[]> = {};
   for (const s of UNIVERSE_SYMBOLS) out[s] = merged[s] ?? [];
@@ -331,7 +349,7 @@ let extraDailyCache: Record<string, OrbDailyBar[]> | null = null;
 async function loadExtraDaily(): Promise<Record<string, OrbDailyBar[]>> {
   if (extraDailyCache) return extraDailyCache;
   const merged = await fetchPaginated<{ t: string; o: number; h: number; l: number; c: number }>(
-    `/v2/stocks/bars?symbols=${encodeURIComponent(EXTRA_UNIVERSE_SYMBOLS.join(","))}&timeframe=1Day&limit=10000&feed=iex&sort=asc&start=2025-01-01T00:00:00Z`
+    `/v2/stocks/bars?symbols=${encodeURIComponent(EXTRA_UNIVERSE_SYMBOLS.join(","))}&timeframe=1Day&limit=10000&feed=iex&adjustment=split,spin-off&sort=asc&start=2022-09-01T00:00:00Z`
   );
   const out: Record<string, OrbDailyBar[]> = {};
   for (const s of EXTRA_UNIVERSE_SYMBOLS) {

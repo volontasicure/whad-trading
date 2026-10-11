@@ -71,7 +71,9 @@ async function fetchDailyBars(symbols, start) {
   do {
     const url =
       `https://data.alpaca.markets/v2/stocks/bars?symbols=${encodeURIComponent(symbols.join(","))}` +
-      `&timeframe=1Day&limit=10000&feed=iex&sort=asc&start=${encodeURIComponent(start)}` +
+      // adjustment=split,spin-off: senza, lo storico è "raw" e split/spin-off (HON 29/6/2026) (NVDA 10:1 6/2024, AVGO 10:1 7/2024,
+      // WMT 3:1 2/2024) creano salti finti nei rapporti tra prezzi — scoperto l'11/10/2026.
+      `&timeframe=1Day&limit=10000&feed=iex&adjustment=split,spin-off&sort=asc&start=${encodeURIComponent(start)}` +
       (pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : "");
     const res = await fetch(url, { headers: { "APCA-API-KEY-ID": keyId, "APCA-API-SECRET-KEY": secretKey } });
     if (!res.ok) throw new Error(`Alpaca GET bars -> ${res.status} ${await res.text().catch(() => "")}`);
