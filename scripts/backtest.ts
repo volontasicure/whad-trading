@@ -391,7 +391,7 @@ async function loadAllDailyOnce(): Promise<Record<string, OrbDailyBar[]>> {
   )) as { symbol: string; d: string; open: string; high: string; low: string; close: string }[];
   const out: Record<string, OrbDailyBar[]> = {};
   for (const s of BASE_UNIVERSE_SYMBOLS) out[s] = [];
-  for (const r of rows) out[r.symbol].push({ t: r.d, o: Number(r.open), h: Number(r.high), l: Number(r.low), c: Number(r.close) });
+  for (const r of rows) out[r.symbol].push({ t: r.d, h: Number(r.high), l: Number(r.low), c: Number(r.close) });
   if (file) {
     mkdirSync(cacheDir!, { recursive: true });
     writeFileSync(file, JSON.stringify(out));
@@ -886,7 +886,7 @@ async function run() {
         if (!byPair.has(leg.pairKey)) byPair.set(leg.pairKey, []);
         byPair.get(leg.pairKey)!.push(leg);
       }
-      for (const [pk, legs] of byPair) {
+      for (const [, legs] of byPair) {
         if (legs.length < 2) continue;
         const oldestEntryDay = Math.min(...legs.map((l) => pairEntryDayIndex.get(l.id) ?? dayIndex));
         const daysHeld = dayIndex - oldestEntryDay + 1; // seduta di apertura stessa conta come 1

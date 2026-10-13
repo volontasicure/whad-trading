@@ -178,3 +178,55 @@ CREATE TABLE IF NOT EXISTS eod_close_lock (
   last_run_at TIMESTAMPTZ
 );
 INSERT INTO eod_close_lock (id, last_run_at) VALUES (true, NULL) ON CONFLICT (id) DO NOTHING;
+
+-- Segnali che una strategia ha visto e il conto reale NON ha eseguito, col motivo (13/10/2026).
+-- Una riga per (giorno, strategia, soggetto, motivo), deduplicata: un segnale bloccato per ore non
+-- produce una riga a tick. Scritta da server/skippedSignals.ts, best-effort, dal tick reale. Serve
+-- a spiegare gli scostamenti reale-vs-lab senza ricostruirli a mano giorni dopo.
+CREATE TABLE IF NOT EXISTS skipped_signals (
+  trading_date DATE NOT NULL,
+  strategy_id TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  detail TEXT,
+  signal NUMERIC,
+  first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ticks INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (trading_date, strategy_id, subject, reason)
+);
+
+-- Un trade (o una coppia) chiuso, con i dati derivati che servono per analizzarlo: escursione
+-- massima contraria e favorevole, segnale a ingresso e uscita, durata, confronto col gemello
+-- nell'altra sorgente (reale e lab) e causa dello scarto. Calcolata a fine seduta da
+-- server/dailyReview.ts a partire da session_bars, pairs_zscore_log, lab_positions e
+-- real_positions (nessuna nuova raccolta). Idempotente: la chiave naturale evita duplicati.
+CREATE TABLE IF NOT EXISTS trade_review (
+  id SERIAL PRIMARY KEY,
+  trading_date DATE NOT NULL,
+  source TEXT NOT NULL,
+  strategy_id TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  side TEXT NOT NULL,
+  entry_time TIMESTAMPTZ NOT NULL,
+  exit_time TIMESTAMPTZ NOT NULL,
+  hold_minutes INTEGER NOT NULL,
+  notional NUMERIC NOT NULL,
+  gross_pnl NUMERIC NOT NULL,
+  cost_est NUMERIC NOT NULL,
+  net_pnl NUMERIC NOT NULL,
+  exit_reason TEXT,
+  mae NUMERIC,
+  mfe NUMERIC,
+  entry_signal NUMERIC,
+  exit_signal NUMERIC,
+  conviction NUMERIC,
+  twin_pnl NUMERIC,
+  return_gap_pct NUMERIC,
+  entry_slip_pct NUMERIC,
+  exit_slip_pct NUMERIC,
+  gap_cause TEXT,
+  UNIQUE (source, strategy_id, subject, entry_time)
+);
+
+CREATE INDEX IF NOT EXISTS trade_review_date_idx ON trade_review (trading_date);

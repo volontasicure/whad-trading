@@ -22,6 +22,7 @@ import { db } from "./db.js";
 import { computeEligibility, computeWeights } from "./strategyAllocation.js";
 import { sizeByConviction, type SizingCandidate } from "./realSizing.js";
 import { findOrphanLegIds, occupiedSymbols } from "./realSymbols.js";
+import { missingFrom, saveSkippedSignals, type SkipRecord } from "./skippedSignals.js";
 import { UNIVERSE_SYMBOLS } from "./universe.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
@@ -222,7 +223,7 @@ async function isShortable(symbol: string): Promise<boolean> {
 async function filterShortableCandidates<T>(
   candidates: T[],
   sidesOf: (c: T) => { symbol: string; side: "LONG" | "SHORT" }[]
-): Promise<T[]> {
+): Promise<{ kept: T[]; rejected: T[] }> {
   const checked = await Promise.all(
     candidates.map(async (c) => {
       const shortSymbols = sidesOf(c)
@@ -233,7 +234,7 @@ async function filterShortableCandidates<T>(
       return { c, ok: results.every(Boolean) };
     })
   );
-  return checked.filter((x) => x.ok).map((x) => x.c);
+  return { kept: checked.filter((x) => x.ok).map((x) => x.c), rejected: checked.filter((x) => !x.ok).map((x) => x.c) };
 }
 
 async function openRealPosition(params: {
@@ -485,6 +486,16 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
   // così due strategie non scelgono lo stesso titolo nello stesso tick.
   const occupied = occupiedSymbols(ctx.openRows, closedIds);
 
+  // Registro dei segnali visti e NON eseguiti (server/skippedSignals.ts): sola diagnostica,
+  // calcolata con le stesse funzioni pure di decisione (nessun I/O in più) e scritta in fondo,
+  // best-effort. Non influenza in nessun modo quali ordini partono.
+  const skips: SkipRecord[] = [];
+  /** Chi tiene un titolo sul conto, per spiegare un `occupied_symbol`. */
+  const heldBy = (symbol: string): string => {
+    const row = ctx.openRows.find((r) => r.symbol === symbol && !closedIds.has(r.id));
+    return row ? `${row.strategy_id}${row.pair_key ? ` (${row.pair_key})` : ""}` : "altra strategia";
+  };
+
   // --- Ingressi: per ogni strategia ammessa oggi (peso > 0), solo se non siamo a ridosso della chiusura ---
   let entryCount = 0;
   let haltedByDailyLoss = false;
@@ -502,6 +513,16 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
     // posizioni già aperte restano gestite normalmente in uscita (sopra).
     if (haltedByDailyLoss) {
       // nessun nuovo ingresso: limite di perdita giornaliero raggiunto
+      for (const id of [VWAP_STRATEGY_ID, ORB_STRATEGY_ID, PAIRS_STRATEGY_ID]) {
+        if (weights[id] > 0) {
+          skips.push({
+            strategyId: id,
+            subject: "*",
+            reason: "daily_loss_halt",
+            detail: `equity ${capital.toFixed(0)} vs ieri ${lastEquity.toFixed(0)}: oltre -${MAX_DAILY_LOSS_PCT}%`,
+          });
+        }
+      }
     } else {
       if (weights[VWAP_STRATEGY_ID] > 0) {
         const vwapCapital = capital * weights[VWAP_STRATEGY_ID];
@@ -510,12 +531,24 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         // ctx.vwapTrend disponibile ma NON passato qui apposta — stesso interruttore spento di
         // api/cron/tick.ts, vedi il commento lì.
         const rawCandidates = decideVwapEntries(UNIVERSE_SYMBOLS, occupied, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
-        const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
+        // Vista "lab" (solo le proprie posizioni): quello che il lab avrebbe scelto e il reale no
+        // perché il titolo è occupato da un'altra strategia.
+        const vwapLabView = decideVwapEntries(UNIVERSE_SYMBOLS, stillOpen, ctx.vwapSnapshots, ctx.vwapBars, freeSlots);
+        for (const c of missingFrom(vwapLabView, rawCandidates, (x) => x.symbol)) {
+          skips.push({ strategyId: VWAP_STRATEGY_ID, subject: c.symbol, reason: "occupied_symbol", detail: `tenuto da ${heldBy(c.symbol)}`, signal: Math.abs(c.distancePct) });
+        }
+        const { kept: candidates, rejected: vwapNotShortable } = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
+        for (const c of vwapNotShortable) {
+          skips.push({ strategyId: VWAP_STRATEGY_ID, subject: c.symbol, reason: "not_shortable", signal: Math.abs(c.distancePct) });
+        }
         const sizingInput: SizingCandidate[] = candidates.map((c) => ({ symbol: c.symbol, price: c.entryPrice, conviction: Math.abs(c.distancePct) }));
         const sized = sizeByConviction(sizingInput, vwapCapital, VWAP_MAX_POSITIONS);
         for (const c of candidates) {
           const qty = sized[c.symbol];
-          if (!qty) continue;
+          if (!qty) {
+            skips.push({ strategyId: VWAP_STRATEGY_ID, subject: c.symbol, reason: "sizing_zero", signal: Math.abs(c.distancePct) });
+            continue;
+          }
           await openRealPosition({
             strategyId: VWAP_STRATEGY_ID,
             symbol: c.symbol,
@@ -548,7 +581,18 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
           inputs[symbol] = { price, openingRange: range, atrPct: atr, avgBarVolume: avgVol, latestBarVolume: volumes[volumes.length - 1] };
         }
         const rawCandidates = decideOrbEntries(UNIVERSE_SYMBOLS, occupied, inputs, freeSlots);
-        const candidates = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
+        const orbLabView = decideOrbEntries(UNIVERSE_SYMBOLS, stillOpen, inputs, freeSlots);
+        const orbStrength = (c: { symbol: string; side: "LONG" | "SHORT"; entryPrice: number }): number => {
+          const r = ctx.openingRanges[c.symbol];
+          return r ? Math.abs(orbBreakoutStrength(c.entryPrice, c.side, r)) : 0;
+        };
+        for (const c of missingFrom(orbLabView, rawCandidates, (x) => x.symbol)) {
+          skips.push({ strategyId: ORB_STRATEGY_ID, subject: c.symbol, reason: "occupied_symbol", detail: `tenuto da ${heldBy(c.symbol)}`, signal: orbStrength(c) });
+        }
+        const { kept: candidates, rejected: orbNotShortable } = await filterShortableCandidates(rawCandidates, (c) => [{ symbol: c.symbol, side: c.side }]);
+        for (const c of orbNotShortable) {
+          skips.push({ strategyId: ORB_STRATEGY_ID, subject: c.symbol, reason: "not_shortable", signal: orbStrength(c) });
+        }
         const sizingInput: SizingCandidate[] = candidates.map((c) => {
           const range = ctx.openingRanges[c.symbol];
           const conviction = range ? Math.abs(orbBreakoutStrength(c.entryPrice, c.side, range)) : 0;
@@ -557,7 +601,10 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         const sized = sizeByConviction(sizingInput, orbCapital, ORB_MAX_POSITIONS);
         for (const c of candidates) {
           const qty = sized[c.symbol];
-          if (!qty) continue;
+          if (!qty) {
+            skips.push({ strategyId: ORB_STRATEGY_ID, subject: c.symbol, reason: "sizing_zero", signal: orbStrength(c) });
+            continue;
+          }
           const range = ctx.openingRanges[c.symbol];
           await openRealPosition({
             strategyId: ORB_STRATEGY_ID,
@@ -585,7 +632,27 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         // strategia, né un'altra coppia, li tiene già).
         const freePairStats = ctx.pairStats.filter((p) => !occupied.has(p.a) && !occupied.has(p.b));
         const rawCandidates = decidePairsEntries(freePairStats, pairsExcludedKeys, ctx.prices, freeSlots);
-        const candidates = await filterShortableCandidates(rawCandidates, (c) => c.legs);
+        // Diagnostica (vedi `skips` sopra): la vista del lab usa tutte le coppie candidate.
+        const pairsLabView = decidePairsEntries(ctx.pairStats, pairsExcludedKeys, ctx.prices, freeSlots);
+        for (const c of missingFrom(pairsLabView, rawCandidates, (x) => x.pairKey)) {
+          const blocked = c.legs.filter((l) => occupied.has(l.symbol)).map((l) => `${l.symbol} tenuto da ${heldBy(l.symbol)}`);
+          skips.push({ strategyId: PAIRS_STRATEGY_ID, subject: c.pairKey, reason: "occupied_symbol", detail: blocked.join("; "), signal: Math.abs(c.z) });
+        }
+        const pairsAllSlots = decidePairsEntries(ctx.pairStats, stillOpenKeys, ctx.prices, MAX_PAIRS);
+        for (const c of pairsAllSlots) {
+          if (ctx.stoppedPairsToday.has(c.pairKey)) {
+            skips.push({ strategyId: PAIRS_STRATEGY_ID, subject: c.pairKey, reason: "cooldown_stop", detail: "uscita in stop oggi", signal: Math.abs(c.z) });
+          }
+        }
+        if (freeSlots <= 0) {
+          for (const c of decidePairsEntries(ctx.pairStats, pairsExcludedKeys, ctx.prices, MAX_PAIRS)) {
+            skips.push({ strategyId: PAIRS_STRATEGY_ID, subject: c.pairKey, reason: "no_free_slots", signal: Math.abs(c.z) });
+          }
+        }
+        const { kept: candidates, rejected: pairsNotShortable } = await filterShortableCandidates(rawCandidates, (c) => c.legs);
+        for (const c of pairsNotShortable) {
+          skips.push({ strategyId: PAIRS_STRATEGY_ID, subject: c.pairKey, reason: "not_shortable", detail: "una gamba short non è shortabile/easy-to-borrow", signal: Math.abs(c.z) });
+        }
         // Una coppia = un candidato di sizing, prezzo fittizio 1 -> la qty restituita è
         // direttamente il budget in dollari per la coppia, diviso poi a metà tra le due gambe
         // (stesso schema "capitale diviso a metà" di pairsTrading.ts, solo con budget variabile
@@ -594,7 +661,10 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         const sizedDollars = sizeByConviction(sizingInput, pairsCapital, MAX_PAIRS);
         for (const c of candidates) {
           const dollars = sizedDollars[c.pairKey];
-          if (!dollars) continue;
+          if (!dollars) {
+            skips.push({ strategyId: PAIRS_STRATEGY_ID, subject: c.pairKey, reason: "sizing_zero", signal: Math.abs(c.z) });
+            continue;
+          }
           const dollarsPerLeg = dollars / 2;
           for (const leg of c.legs) {
             const qty = Math.max(1, Math.floor(dollarsPerLeg / leg.entryPrice));
@@ -615,6 +685,15 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
           }
         }
       }
+    }
+  }
+
+  // Registro dei segnali non eseguiti: sola diagnostica, dopo ogni ordine, mai bloccante.
+  if (skips.length > 0) {
+    try {
+      await saveSkippedSignals(ctx.tradingDate, skips, ctx.now);
+    } catch (err) {
+      console.error("registro segnali scartati non scritto, proseguo:", (err as Error).message);
     }
   }
 

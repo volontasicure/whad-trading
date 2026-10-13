@@ -8,6 +8,7 @@ import { saveDailyBars, saveSessionBars } from "../../server/barsStore.js";
 import { runRealExecution, type RealPositionRow } from "../../server/realExecution.js";
 import { runRealEodClose, finalizeTodaySession } from "../../server/realEod.js";
 import { runConsistencyIfDue } from "../../server/consistencyRunner.js";
+import { runDailyReviewIfDue } from "../../server/dailyReview.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
   STRATEGY_ID as ORB_STRATEGY_ID,
@@ -214,7 +215,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!clock.is_open) {
       const note = `mercato chiuso, prossima apertura ${clock.next_open}`;
       await db()`INSERT INTO tick_log (market_open, note) VALUES (false, ${note})`;
-      res.status(200).json({ marketOpen: false, note });
+      // Revisione di fine seduta (server/dailyReview.ts): solo a mercato chiuso, dopo la scrittura di
+      // tick_log, con stato/tentativi propri e mai un'eccezione verso l'esterno. Non può toccare l'esecuzione.
+      let reviewNote = "review: non eseguita";
+      try {
+        reviewNote = await runDailyReviewIfDue({ now: new Date(), startedAtMs });
+      } catch (err) {
+        reviewNote = `review: errore (${(err as Error).message})`;
+      }
+      res.status(200).json({ marketOpen: false, note, review: reviewNote });
       return;
     }
 
