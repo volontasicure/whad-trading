@@ -516,11 +516,25 @@ export function applyRealLabData(book: BookRow[], realData: RealLabOverrides): B
     const cells = row.cells.map((cell, idx) => {
       const real = realData[STRATEGIES[idx].id];
       if (!real) return cell;
-      const pos = real.openPositions.find((p) => p.symbol === row.symbol);
-      if (!pos) return { side: "FLAT" as Side, qty: cell.qty, avg: row.price, last: row.price, unreal: 0, real: 0 };
-      const dir = pos.side === "SHORT" ? -1 : 1;
-      const unreal = Math.round(dir * pos.qty * (row.price - pos.entryPrice));
-      return { side: pos.side, qty: pos.qty, avg: pos.entryPrice, last: row.price, unreal, real: 0 };
+      // Più posizioni aperte della stessa strategia sullo stesso titolo sono possibili (il pairs nel
+      // lab può tenere PEP sia in KO/PEP sia in PEP/PG: il lab non ha il vincolo "un titolo = una
+      // strategia" del conto reale). Prima si prendeva solo la prima riga, perdendo le altre dal
+      // totale (13/10/2026: +128$ di PEP/PG spariti, non realizzato mostrato oltre -1.000$ invece
+      // di -894$). Ora si sommano: unrealized = somma per riga, cella = posizione netta sul titolo.
+      const positions = real.openPositions.filter((p) => p.symbol === row.symbol);
+      if (positions.length === 0) return { side: "FLAT" as Side, qty: cell.qty, avg: row.price, last: row.price, unreal: 0, real: 0 };
+      const unreal = Math.round(
+        positions.reduce((sum, p) => sum + (p.side === "SHORT" ? -1 : 1) * p.qty * (row.price - p.entryPrice), 0)
+      );
+      if (positions.length === 1) {
+        const pos = positions[0];
+        return { side: pos.side, qty: pos.qty, avg: pos.entryPrice, last: row.price, unreal, real: 0 };
+      }
+      const netQty = positions.reduce((sum, p) => sum + (p.side === "SHORT" ? -p.qty : p.qty), 0);
+      const side: Side = netQty === 0 ? "FLAT" : netQty > 0 ? "LONG" : "SHORT";
+      // Prezzo medio implicito della posizione netta; a netto zero resta il prezzo corrente.
+      const avg = netQty === 0 ? row.price : row.price - unreal / netQty;
+      return { side, qty: Math.abs(netQty), avg, last: row.price, unreal, real: 0 };
     });
     return { ...row, cells };
   });
