@@ -53,7 +53,7 @@ if (open.length === 0) {
   if (maxGap > 10) warn(`Buco nei tick: ${maxGap.toFixed(0)} min dopo le ${gapAt} UTC`);
   else ok(`Cadenza regolare (buco massimo ${maxGap.toFixed(1)} min)`);
   const ageMin = (Date.now() - new Date(open[open.length - 1].ran_at)) / 60000;
-  if (clock.is_open && ageMin > 10) bad(`Ultimo tick di ${ageMin.toFixed(0)} minuti fa a mercato APERTO`);
+  if (clock.is_open && day === new Date().toISOString().slice(0, 10) && ageMin > 10) bad(`Ultimo tick di ${ageMin.toFixed(0)} minuti fa a mercato APERTO`);
 }
 
 // 3. Errori nelle note e allocazione reale
@@ -67,7 +67,8 @@ else {
 const realStrategies = new Set();
 for (const t of open) {
   const m = (t.note || "").match(/reale: ([a-z_+]+)/);
-  if (m) m[1].split("+").forEach((s) => realStrategies.add(s));
+  // Solo id di strategia veri: "reale: saltata (...)" non è un elenco di strategie.
+  if (m) m[1].split("+").filter((s) => ["orb", "vwap_reversion", "pairs"].includes(s)).forEach((s) => realStrategies.add(s));
 }
 if (open.length > 0) {
   if (realStrategies.size === 0) warn("Nessuna riga `reale:` nelle note (esecuzione reale saltata? debriefing non confermato?)");
