@@ -160,6 +160,78 @@ if (EXP_PAIRS_MAX_HOLD_DAYS > 0) console.log(`EXP_PAIRS_MAX_HOLD_DAYS=${EXP_PAIR
 const EXP_PAIRS_STALENESS_DAYS = process.env.EXP_PAIRS_STALENESS_DAYS ? Number(process.env.EXP_PAIRS_STALENESS_DAYS) : 0;
 const EXP_PAIRS_STALENESS_PROXIMITY = process.env.EXP_PAIRS_STALENESS_PROXIMITY ? Number(process.env.EXP_PAIRS_STALENESS_PROXIMITY) : 1.0;
 if (EXP_PAIRS_STALENESS_DAYS > 0) console.log(`EXP_PAIRS_STALENESS_DAYS=${EXP_PAIRS_STALENESS_DAYS} (prossimità=${EXP_PAIRS_STALENESS_PROXIMITY})`);
+
+// --- Esperimenti "trader review" (20/10/2026): tutti spenti di default, MAI attivi in produzione ---
+// EXP_PAIRS_CAPITAL_MULT=L moltiplica la size per coppia (leva sul nozionale, 1 = produzione);
+// EXP_PAIRS_RISK_SIZING=1 pesa la size per coppia in modo inversamente proporzionale alla volatilità
+//   giornaliera dello spread (mediana del giorno = 1x, limitata a [0,5x, 2x]);
+// EXP_PAIRS_SHOCK_K=K salta le coppie in cui un titolo si muove OGGI più di K deviazioni standard
+//   giornaliere (ultime 20 sedute): la divergenza nasce probabilmente da una notizia, non da rumore;
+// EXP_PAIRS_SECTOR_CAP=N al massimo N coppie aperte per settore (le coppie dello stesso settore
+//   perdono insieme: JPM/BAC + banche, KO/PEP + PEP/PG);
+// EXP_PAIRS_AGG_LOSS_PCT=X nessun nuovo ingresso se il non realizzato aggregato delle coppie aperte è
+//   sotto -X% del capitale del lab (100k × CAPITAL_MULT).
+// Ogni esecuzione scrive anche, nel JSON, il registro dei trade pairs (tradeLog) e l'esposizione per seduta.
+const EXP_PAIRS_CAPITAL_MULT = numEnv("EXP_PAIRS_CAPITAL_MULT") ?? 1;
+const EXP_PAIRS_RISK_SIZING = process.env.EXP_PAIRS_RISK_SIZING === "1";
+const EXP_PAIRS_SHOCK_K = numEnv("EXP_PAIRS_SHOCK_K");
+const EXP_PAIRS_SECTOR_CAP = numEnv("EXP_PAIRS_SECTOR_CAP");
+const EXP_PAIRS_AGG_LOSS_PCT = numEnv("EXP_PAIRS_AGG_LOSS_PCT");
+const LAB_CAPITAL_BT = 100_000;
+// EXP_PAIRS_MAX_OPEN=N tetto di coppie aperte contemporaneamente (default MAX_PAIRS = 10);
+// EXP_PAIRS_SIZE_BASIS=N size per coppia = capitale/N (default MAX_PAIRS = 10): con MAX_OPEN=20 e SIZE_BASIS=20
+// si diversifica a parità di esposizione, con SIZE_BASIS=10 l'esposizione cresce con il numero di coppie.
+// Insieme a EXP_PAIRS_CANDIDATES (pool di coppie candidate) misurano l'ampiezza del pairs.
+// EXP_PAIRS_HL_MAX=H tiene solo le coppie con emivita di rientro <= H sedute (selezione per velocità).
+const EXP_PAIRS_MAX_OPEN = numEnv("EXP_PAIRS_MAX_OPEN");
+const EXP_PAIRS_SIZE_BASIS = numEnv("EXP_PAIRS_SIZE_BASIS");
+const EXP_PAIRS_HL_MAX = numEnv("EXP_PAIRS_HL_MAX");
+const PAIRS_CAP = EXP_PAIRS_MAX_OPEN ?? MAX_PAIRS;
+// EXP_PAIRS_FROZEN_EXIT=1: l'uscita (rientro e stop) usa media e deviazione standard del rapporto calcolate AL GIORNO
+// DI INGRESSO invece di quelle mobili (120 sedute): con le statistiche mobili il "bersaglio" si sposta verso il
+// rapporto corrente, e una coppia che non rientra mai "esce a target" in perdita dopo mesi (scoperto il 20/10/2026
+// con la run continua: 42 trade persi su 154, durata mediana 84 sedute contro 20 dei vinti).
+// EXP_PAIRS_LOSS_STOP_PCT=X: stop in dollari per coppia, chiude se il non realizzato scende sotto -X% del nozionale d'ingresso.
+const EXP_PAIRS_FROZEN_EXIT = process.env.EXP_PAIRS_FROZEN_EXIT === "1";
+const EXP_PAIRS_LOSS_STOP_PCT = numEnv("EXP_PAIRS_LOSS_STOP_PCT");
+const pairEntryStats = new Map<string, PairStats>();
+// EXP_PAIRS_MAX_GROSS_PCT=X nessun nuovo ingresso se il nozionale lordo aperto (tutte le gambe) supererebbe X% del capitale (margine Reg T: 200%).
+const EXP_PAIRS_MAX_GROSS_PCT = numEnv("EXP_PAIRS_MAX_GROSS_PCT");
+// EXP_PAIRS_MAX_MIN=N consente nuovi ingressi pairs solo nei primi N minuti di seduta (entrare solo sulle divergenze notturne/di apertura).
+const EXP_PAIRS_MAX_MIN = numEnv("EXP_PAIRS_MAX_MIN") ?? Infinity;
+// EXP_PAIRS_MIN_CORR=X scarta le coppie con correlazione dei rendimenti giornalieri sotto X;
+// EXP_PAIRS_EXCLUDE_SECTORS=fin,tech esclude quei settori dalla formazione delle coppie (settore = valore in SECTORS);
+// EXP_PAIRS_SELECT_LOOKBACK=N sceglie le coppie sulle ultime N sedute ma calcola z-score e media su EXP_DAILY_LOOKBACK.
+const EXP_PAIRS_MIN_CORR = numEnv("EXP_PAIRS_MIN_CORR");
+const EXP_PAIRS_SELECT_LOOKBACK = numEnv("EXP_PAIRS_SELECT_LOOKBACK");
+const EXCLUDED_SECTORS = new Set((process.env.EXP_PAIRS_EXCLUDE_SECTORS ?? "").split(",").filter(Boolean));
+// Un titolo di un settore escluso finisce in un settore tutto suo: non forma mai coppie.
+const SEL_SECTORS: Record<string, string> = Object.fromEntries(
+  Object.entries(PAIRS_SECTORS).map(([sym, sec]) => [sym, EXCLUDED_SECTORS.has(sec) ? "__escluso_" + sym : sec])
+);
+/** Emivita (sedute) dell'AR(1) sul log-rapporto A/B nelle ultime sedute; Infinity se non c'è rientro. */
+function halfLife(closesA: number[], closesB: number[]): number | null {
+  const n = Math.min(closesA.length, closesB.length);
+  if (n < 40) return null;
+  const x: number[] = [];
+  for (let i = 0; i < n; i++) x.push(Math.log(closesA[closesA.length - n + i] / closesB[closesB.length - n + i]));
+  const mu = x.reduce((a, b) => a + b, 0) / n;
+  const d = x.map((v) => v - mu);
+  let sxy = 0;
+  let sxx = 0;
+  for (let t = 1; t < n; t++) {
+    sxy += d[t - 1] * (d[t] - d[t - 1]);
+    sxx += d[t - 1] * d[t - 1];
+  }
+  const phi = sxy / sxx;
+  return phi >= 0 ? Infinity : -Math.log(2) / Math.log(1 + phi);
+}
+if (EXP_PAIRS_CAPITAL_MULT !== 1 || EXP_PAIRS_RISK_SIZING || EXP_PAIRS_SHOCK_K != null || EXP_PAIRS_SECTOR_CAP != null || EXP_PAIRS_AGG_LOSS_PCT != null) {
+  console.log(
+    "TRADER-REVIEW: mult=" + EXP_PAIRS_CAPITAL_MULT + " risk_sizing=" + EXP_PAIRS_RISK_SIZING + " shock_k=" + (EXP_PAIRS_SHOCK_K ?? "-") +
+      " sector_cap=" + (EXP_PAIRS_SECTOR_CAP ?? "-") + " agg_loss=" + (EXP_PAIRS_AGG_LOSS_PCT ?? "-")
+  );
+}
 // SCARTATA l'1/10/2026, stesso giorno della precedente: peggiora il P&L pairs su ENTRAMBE le
 // finestre a ogni valore testato (3/5/7 giorni, prossimità 1.0) rispetto al baseline
 // (+2.376/+2.725) — -40/806, 342/1.589, 673/1.595. Peggioramento monotono (più stringente il
@@ -264,6 +336,11 @@ const pairMae = new Map<string, number>();
 const pairsMaeList: { mae: number; pnl: number; open?: boolean }[] = [];
 const dailyEndUnreal: number[] = [];
 const dailyMinUnreal: number[] = [];
+const dailyOpenPairs: number[] = [];
+const dailyGrossNotional: number[] = [];
+interface PairMeta { dayIdx: number; z: number; minFromOpen: number; shockA: number; shockB: number; scale: number; spreadVol: number | null }
+const pairMeta = new Map<string, PairMeta>();
+const pairsTradeLog: Record<string, unknown>[] = [];
 function recordTrade(strat: StratKey, pnl: number, turnover: number) {
   const net = pnl - BACKTEST_COST_PCT * turnover;
   const s = tradeStats[strat];
@@ -292,7 +369,9 @@ interface AlpacaCalendarEntry {
 /** beforeDateIso, se dato, ancora la finestra PRIMA di quella data (esclusa) invece che su oggi — per test fuori campione. */
 async function fetchTradingDays(count: number, beforeDateIso?: string): Promise<string[]> {
   const end = beforeDateIso ?? new Date().toISOString().slice(0, 10);
-  const start = new Date(new Date(end).getTime() - (count + 15) * 86_400_000).toISOString().slice(0, 10);
+  // BACKTEST_CAL_FACTOR (default 1 = comportamento storico) allarga il buffer di calendario per richieste molto più lunghe di ~100 sedute.
+  const calFactor = process.env.BACKTEST_CAL_FACTOR ? Number(process.env.BACKTEST_CAL_FACTOR) : 1;
+  const start = new Date(new Date(end).getTime() - Math.ceil(count * calFactor + 15) * 86_400_000).toISOString().slice(0, 10);
   const cal = await alpacaFetch<AlpacaCalendarEntry[]>(`/v2/calendar?start=${start}&end=${end}`);
   const days = cal.map((c) => c.date);
   const filtered = beforeDateIso ? days.filter((d) => d < beforeDateIso) : days;
@@ -504,6 +583,18 @@ async function run() {
     const dailyBarsBefore = await loadDailyClosesBeforeDate(day);
     const closesBySymbol: Record<string, number[]> = {};
     for (const s of UNIVERSE_SYMBOLS) closesBySymbol[s] = dailyBarsBefore[s].map((b) => b.c).slice(-EXP_DAILY_LOOKBACK);
+    // Per i filtri "trader review": chiusura precedente e deviazione standard dei rendimenti giornalieri (20 sedute).
+    const prevClose: Record<string, number> = {};
+    const sigma20: Record<string, number> = {};
+    for (const s of UNIVERSE_SYMBOLS) {
+      const cs = closesBySymbol[s];
+      if (cs.length < 22) continue;
+      prevClose[s] = cs[cs.length - 1];
+      const rets: number[] = [];
+      for (let i = cs.length - 20; i < cs.length; i++) rets.push(Math.log(cs[i] / cs[i - 1]));
+      const m = rets.reduce((a, b) => a + b, 0) / rets.length;
+      sigma20[s] = Math.sqrt(rets.reduce((a, b) => a + (b - m) ** 2, 0) / rets.length);
+    }
 
     const orbAtr: Record<string, number> = {};
     for (const s of UNIVERSE_SYMBOLS) {
@@ -520,9 +611,25 @@ async function run() {
     if (Object.keys(orbAtr).length === 0) flag(`[${day}] ATR non calcolabile per nessun simbolo (storico daily insufficiente prima di questa data)`);
 
     let pairStats: PairStats[] = selectPairs(closesBySymbol, {
-      maxPairs: EXP_PAIRS_CANDIDATES ?? undefined,
-      sectors: PAIRS_SECTORS,
+      maxPairs: EXP_PAIRS_HL_MAX != null ? 40 : (EXP_PAIRS_CANDIDATES ?? undefined),
+      sectors: SEL_SECTORS,
     });
+    if (EXP_PAIRS_SELECT_LOOKBACK != null) {
+      const longCloses: Record<string, number[]> = {};
+      for (const sym of UNIVERSE_SYMBOLS) longCloses[sym] = dailyBarsBefore[sym].map((b) => b.c).slice(-EXP_PAIRS_SELECT_LOOKBACK);
+      pairStats = selectPairs(longCloses, { maxPairs: EXP_PAIRS_CANDIDATES ?? undefined, sectors: SEL_SECTORS })
+        .map((p) => statsForPair(p.a, p.b, closesBySymbol))
+        .filter((p): p is PairStats => p != null);
+    }
+    if (EXP_PAIRS_MIN_CORR != null) pairStats = pairStats.filter((p) => p.correlation >= EXP_PAIRS_MIN_CORR);
+    if (EXP_PAIRS_HL_MAX != null) {
+      pairStats = pairStats
+        .filter((p) => {
+          const hl = halfLife(closesBySymbol[p.a], closesBySymbol[p.b]);
+          return hl != null && hl <= EXP_PAIRS_HL_MAX;
+        })
+        .slice(0, EXP_PAIRS_CANDIDATES ?? MAX_PAIRS);
+    }
     const openPairKeysAtStart = new Set(pairsOpen.map((l) => l.pairKey));
     for (const key of openPairKeysAtStart) {
       if (pairStats.some((p) => pairKey(p.a, p.b) === key)) continue;
@@ -530,6 +637,25 @@ async function run() {
       const st = statsForPair(a, b, closesBySymbol);
       if (st) pairStats.push(st);
     }
+
+    // Volatilità giornaliera dello spread log(A/B) sulle ultime 60 sedute, per il risk sizing delle coppie.
+    const spreadVol = new Map<string, number>();
+    for (const p of pairStats) {
+      const ca = closesBySymbol[p.a];
+      const cb = closesBySymbol[p.b];
+      const n = Math.min(ca.length, cb.length);
+      if (n < 30) continue;
+      const lr: number[] = [];
+      for (let i = Math.max(1, n - 60); i < n; i++) {
+        const r1 = ca[ca.length - n + i] / cb[cb.length - n + i];
+        const r0 = ca[ca.length - n + i - 1] / cb[cb.length - n + i - 1];
+        lr.push(Math.log(r1 / r0));
+      }
+      const mu = lr.reduce((a, b) => a + b, 0) / lr.length;
+      spreadVol.set(pairKey(p.a, p.b), Math.sqrt(lr.reduce((a, b) => a + (b - mu) ** 2, 0) / lr.length));
+    }
+    const sortedVols = [...spreadVol.values()].sort((a, b) => a - b);
+    const medianSpreadVol = sortedVols.length ? sortedVols[Math.floor(sortedVols.length / 2)] : 0;
 
     let openingRanges: Record<string, OpeningRange> = {};
     const vwapStoppedToday = new Set<string>();
@@ -593,9 +719,37 @@ async function run() {
       const pairStatsByKey: Record<string, PairStats> = {};
       for (const p of pairStats) pairStatsByKey[pairKey(p.a, p.b)] = p;
       try {
-        pairsExits = decidePairsExits(pairsOpen, prices, pairStatsByKey, EXP_PAIRS_EXIT_Z ?? undefined, EXP_PAIRS_STOP_Z ?? undefined);
+        const exitStats: Record<string, PairStats> = EXP_PAIRS_FROZEN_EXIT ? { ...pairStatsByKey } : pairStatsByKey;
+        if (EXP_PAIRS_FROZEN_EXIT) for (const [k, st] of pairEntryStats) if (pairsOpen.some((l) => l.pairKey === k)) exitStats[k] = st;
+        pairsExits = decidePairsExits(pairsOpen, prices, exitStats, EXP_PAIRS_EXIT_Z ?? undefined, EXP_PAIRS_STOP_Z ?? undefined);
       } catch (e) {
         flag(`[${day} ${timeIso}] eccezione in decidePairsExits: ${(e as Error).message}`);
+      }
+      if (EXP_PAIRS_LOSS_STOP_PCT != null) {
+        const already = new Set(pairsExits.flatMap((x) => x.legIds));
+        const byKey = new Map<string, typeof pairsOpen>();
+        for (const l of pairsOpen) {
+          if (already.has(l.id)) continue;
+          if (!byKey.has(l.pairKey)) byKey.set(l.pairKey, []);
+          byKey.get(l.pairKey)!.push(l);
+        }
+        for (const [key, legs] of byKey) {
+          if (legs.length < 2) continue;
+          let unreal = 0;
+          let notional = 0;
+          let priced = true;
+          for (const l of legs) {
+            const px = prices[l.symbol];
+            if (px == null) {
+              priced = false;
+              break;
+            }
+            unreal += l.qty * (px - l.entryPrice) * (l.side === "LONG" ? 1 : -1);
+            notional += l.qty * l.entryPrice;
+          }
+          if (!priced || unreal >= -(EXP_PAIRS_LOSS_STOP_PCT / 100) * notional) continue;
+          pairsExits.push({ pairKey: key, legIds: legs.map((l) => l.id), realizedPnl: Math.round(unreal), reason: "stop" });
+        }
       }
 
       if (EXP_PAIRS_STALENESS_DAYS > 0) {
@@ -644,6 +798,32 @@ async function run() {
         totals.pairs.turnover += pairTurnover;
         recordTrade("pairs", ex.realizedPnl, pairTurnover);
         pairsMaeList.push({ mae: Math.min(pairMae.get(ex.pairKey) ?? 0, ex.realizedPnl), pnl: ex.realizedPnl });
+        {
+          const meta = pairMeta.get(ex.pairKey);
+          const st = pairStatsByKey[ex.pairKey];
+          const pa = st ? prices[st.a] : undefined;
+          const pb = st ? prices[st.b] : undefined;
+          pairsTradeLog.push({
+            key: ex.pairKey,
+            sector: PAIRS_SECTORS[ex.pairKey.split("/")[0]] ?? "?",
+            entryDay: meta ? tradingDays[meta.dayIdx] : null,
+            exitDay: day,
+            holdDays: meta ? dayIndex - meta.dayIdx + 1 : null,
+            entryZ: meta ? meta.z : null,
+            exitZ: st && pa != null && pb != null ? currentZ(pa, pb, st) : null,
+            entryMin: meta ? meta.minFromOpen : null,
+            shockA: meta ? meta.shockA : null,
+            shockB: meta ? meta.shockB : null,
+            spreadVol: meta ? meta.spreadVol : null,
+            scale: meta ? meta.scale : 1,
+            reason: ex.reason,
+            gross: ex.realizedPnl,
+            turnover: pairTurnover,
+            mae: Math.min(pairMae.get(ex.pairKey) ?? 0, ex.realizedPnl),
+          });
+          pairMeta.delete(ex.pairKey);
+          pairEntryStats.delete(ex.pairKey);
+        }
         pairMae.delete(ex.pairKey);
         totals.pairs.exits++;
         dayCounters.pairsExits++;
@@ -742,19 +922,80 @@ async function run() {
           }
         }
         const pairsExcludedKeys = new Set([...pairsStillOpenKeys, ...stoppedPairsToday, ...stalePairKeys]);
+        // Filtri "trader review" sui NUOVI ingressi (spenti di default).
+        let pairsSlots = PAIRS_CAP - pairsStillOpenKeys.size;
+        if (EXP_PAIRS_SECTOR_CAP != null) {
+          const bySector = new Map<string, number>();
+          for (const k of pairsStillOpenKeys) {
+            const sec = PAIRS_SECTORS[k.split("/")[0]] ?? "?";
+            bySector.set(sec, (bySector.get(sec) ?? 0) + 1);
+          }
+          for (const st of pairStats) {
+            const sec = PAIRS_SECTORS[st.a] ?? "?";
+            if ((bySector.get(sec) ?? 0) >= EXP_PAIRS_SECTOR_CAP) pairsExcludedKeys.add(pairKey(st.a, st.b));
+          }
+        }
+        if (EXP_PAIRS_SHOCK_K != null) {
+          for (const st of pairStats) {
+            for (const sym of [st.a, st.b]) {
+              const pc = prevClose[sym];
+              const sg = sigma20[sym];
+              const px = prices[sym];
+              if (pc == null || sg == null || px == null) continue;
+              if (Math.abs(Math.log(px / pc)) > EXP_PAIRS_SHOCK_K * sg) {
+                pairsExcludedKeys.add(pairKey(st.a, st.b));
+                break;
+              }
+            }
+          }
+        }
+        if (EXP_PAIRS_AGG_LOSS_PCT != null) {
+          let unreal = 0;
+          for (const l of pairsOpen) {
+            const px = prices[l.symbol];
+            if (px != null) unreal += l.qty * (px - l.entryPrice) * (l.side === "LONG" ? 1 : -1);
+          }
+          if (unreal < -(EXP_PAIRS_AGG_LOSS_PCT / 100) * LAB_CAPITAL_BT * EXP_PAIRS_CAPITAL_MULT) pairsSlots = 0;
+        }
         let pairsEntries: ReturnType<typeof decidePairsEntries> = [];
         try {
           const minutesFromOpen = (now.getTime() - openMs) / 60_000;
-          if (minutesFromOpen >= EXP_PAIRS_DELAY_MIN) {
-            pairsEntries = decidePairsEntries(pairStats, pairsExcludedKeys, prices, MAX_PAIRS - pairsStillOpenKeys.size, EXP_PAIRS_ENTRY_Z ?? undefined);
+          if (minutesFromOpen >= EXP_PAIRS_DELAY_MIN && minutesFromOpen <= EXP_PAIRS_MAX_MIN) {
+            pairsEntries = decidePairsEntries(pairStats, pairsExcludedKeys, prices, pairsSlots, EXP_PAIRS_ENTRY_Z ?? undefined);
           }
         } catch (e) {
           flag(`[${day} ${timeIso}] eccezione in decidePairsEntries: ${(e as Error).message}`);
         }
         for (const e of pairsEntries) {
+          let scale = EXP_PAIRS_CAPITAL_MULT * (MAX_PAIRS / (EXP_PAIRS_SIZE_BASIS ?? MAX_PAIRS));
+          const sv = spreadVol.get(e.pairKey) ?? null;
+          if (EXP_PAIRS_RISK_SIZING && sv && medianSpreadVol > 0) scale *= Math.min(2, Math.max(0.5, medianSpreadVol / sv));
+          const shock = (sym: string): number => {
+            const pc = prevClose[sym];
+            const px = prices[sym];
+            return pc != null && px != null ? Math.log(px / pc) : 0;
+          };
+          if (EXP_PAIRS_MAX_GROSS_PCT != null) {
+            let grossNow = 0;
+            for (const l of pairsOpen) grossNow += l.qty * (prices[l.symbol] ?? l.entryPrice);
+            let grossNew = 0;
+            for (const leg of e.legs) grossNew += Math.max(1, Math.round(leg.qty * scale)) * leg.entryPrice;
+            if (grossNow + grossNew > (EXP_PAIRS_MAX_GROSS_PCT / 100) * LAB_CAPITAL_BT) continue;
+          }
+          pairEntryStats.set(e.pairKey, pairStatsByKey[e.pairKey] ?? pairStats.find((p) => pairKey(p.a, p.b) === e.pairKey)!);
+          pairMeta.set(e.pairKey, {
+            dayIdx: dayIndex,
+            z: e.z,
+            minFromOpen: (now.getTime() - openMs) / 60_000,
+            shockA: shock(e.legs[0].symbol),
+            shockB: shock(e.legs[1].symbol),
+            scale,
+            spreadVol: sv,
+          });
           for (const leg of e.legs) {
             const id = nextId++;
-            pairsOpen.push({ id, pairKey: e.pairKey, symbol: leg.symbol, side: leg.side, qty: leg.qty, entryPrice: leg.entryPrice });
+            const qty = Math.max(1, Math.round(leg.qty * scale));
+            pairsOpen.push({ id, pairKey: e.pairKey, symbol: leg.symbol, side: leg.side, qty, entryPrice: leg.entryPrice });
             strategyOf.set(id, "pairs");
             pairEntryDayIndex.set(id, dayIndex);
           }
@@ -783,7 +1024,7 @@ async function run() {
       if (vwapOpen.length > VWAP_MAX_POSITIONS) flag(`[${day} ${timeIso}] VWAP supera MAX_POSITIONS: ${vwapOpen.length} > ${VWAP_MAX_POSITIONS}`);
       const legsByPair = new Map<string, number>();
       for (const l of pairsOpen) legsByPair.set(l.pairKey, (legsByPair.get(l.pairKey) ?? 0) + 1);
-      if (legsByPair.size > MAX_PAIRS) flag(`[${day} ${timeIso}] pairs supera MAX_PAIRS: ${legsByPair.size} > ${MAX_PAIRS}`);
+      if (legsByPair.size > PAIRS_CAP) flag(`[${day} ${timeIso}] pairs supera il tetto: ${legsByPair.size} > ${PAIRS_CAP}`);
       for (const [key, count] of legsByPair) if (count !== 2) flag(`[${day} ${timeIso}] coppia ${key} ha ${count} gambe aperte, attese 2`);
       for (const p of [...orbOpen, ...vwapOpen, ...pairsOpen]) {
         if (!Number.isFinite(p.qty) || p.qty <= 0) flag(`[${day} ${timeIso}] qty non valida per ${p.symbol}: ${p.qty}`);
@@ -927,6 +1168,8 @@ async function run() {
       endUnreal += l.qty * (px - l.entryPrice) * (l.side === "LONG" ? 1 : -1);
     }
     dailyEndUnreal.push(endUnreal);
+    dailyOpenPairs.push(new Set(pairsOpen.map((l) => l.pairKey)).size);
+    dailyGrossNotional.push(pairsOpen.reduce((a, l) => a + l.qty * (lastPrices[l.symbol] ?? l.entryPrice), 0));
     dailyMinUnreal.push(Math.min(dayMinUnreal, endUnreal));
 
     console.log(
@@ -993,7 +1236,7 @@ async function run() {
             dailyTurnover: dailyTurnover[k],
             dailyTrades: dailyTrades[k],
             trades: tradeStats[k],
-            ...(k === "pairs" ? { mtm: { dailyEndUnreal, dailyMinUnreal, mae: pairsMaeList } } : {}),
+            ...(k === "pairs" ? { mtm: { dailyEndUnreal, dailyMinUnreal, mae: pairsMaeList }, exposure: { dailyOpenPairs, dailyGrossNotional }, tradeLog: pairsTradeLog } : {}),
           },
         ])
       ),
