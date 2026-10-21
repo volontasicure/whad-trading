@@ -28,6 +28,7 @@ import { CAPITAL } from "./pairsTrading.js";
 import { todayResultFor, STRATEGY_IDS } from "./debrief.js";
 import { computeEligibility } from "./strategyAllocation.js";
 import { findOrphanLegIds } from "./realSymbols.js";
+import { findExpiredPairs, sessionDateOf, type PairHoldInfo } from "./pairsTimeStop.js";
 
 export interface AlpacaEodPosition {
   symbol: string;
@@ -42,6 +43,8 @@ export interface RealEodOpenRow {
   side: "LONG" | "SHORT";
   qty: number;
   entry_price: number;
+  /** Orario di apertura, per lo stop a tempo del pairs (server/pairsTimeStop.ts). */
+  entry_time?: string | Date;
 }
 
 /**
@@ -60,6 +63,8 @@ export interface RealEodClosePlan {
   /** Solo se whole = false: lato e quantità (azioni) dell'ordine parziale; qty 0 = nessun ordine. */
   orderSide?: "buy" | "sell";
   orderQty?: number;
+  /** Coppie (pair_key) chiuse da questa operazione per lo stop a tempo: motivo d'uscita "max_hold_days" invece di "orphan_leg". */
+  timeStopPairs?: string[];
 }
 
 interface AlpacaOrder {
@@ -123,7 +128,7 @@ async function closeAndRecord(plan: RealEodClosePlan): Promise<void> {
     await db()`
       UPDATE real_positions
       SET status = 'closed', exit_price = ${price}, exit_time = now(), realized_pnl = ${realizedPnl},
-          exit_reason = ${r.pair_key ? "orphan_leg" : "eod"}, broker_exit_order_id = ${orderId}
+          exit_reason = ${r.pair_key ? (plan.timeStopPairs?.includes(r.pair_key) ? "max_hold_days" : "orphan_leg") : "eod"}, broker_exit_order_id = ${orderId}
       WHERE id = ${r.id}
     `;
   }
@@ -152,7 +157,12 @@ async function closeAndRecord(plan: RealEodClosePlan): Promise<void> {
  * la strategia non accetta: a fine giornata si chiude anch'essa (exit_reason "orphan_leg"),
  * come rete di sicurezza di realExecution.ts che la chiude già a ogni tick.
  */
-export function decideRealEodCloses(positions: AlpacaEodPosition[], openRows: RealEodOpenRow[]): RealEodClosePlan[] {
+export function decideRealEodCloses(
+  positions: AlpacaEodPosition[],
+  openRows: RealEodOpenRow[],
+  /** Coppie scadute per lo stop a tempo (server/pairsTimeStop.ts): entrambe le gambe si chiudono a fine seduta. */
+  expiredPairs: Set<string> = new Set()
+): RealEodClosePlan[] {
   const orphanIds = findOrphanLegIds(openRows);
   const rowsBySymbol = new Map<string, RealEodOpenRow[]>();
   for (const r of openRows) {
@@ -168,15 +178,16 @@ export function decideRealEodCloses(positions: AlpacaEodPosition[], openRows: Re
       continue;
     }
     // Da chiudere: singole (nessun pair_key) e gambe orfane. Le gambe di coppie complete restano.
-    const closing = rows.filter((r) => !r.pair_key || orphanIds.has(r.id));
+    const closing = rows.filter((r) => !r.pair_key || orphanIds.has(r.id) || expiredPairs.has(r.pair_key));
     if (closing.length === 0) continue;
+    const timeStopPairs = [...new Set(closing.filter((r) => r.pair_key && expiredPairs.has(r.pair_key) && !orphanIds.has(r.id)).map((r) => r.pair_key!))];
     const staying = rows.length - closing.length;
     if (staying === 0) {
-      plans.push({ position: p, rows: closing, whole: true });
+      plans.push({ position: p, rows: closing, whole: true, timeStopPairs });
       continue;
     }
     const net = closing.reduce((s, r) => s + (r.side === "LONG" ? r.qty : -r.qty), 0);
-    plans.push({ position: p, rows: closing, whole: false, orderSide: net > 0 ? "sell" : "buy", orderQty: Math.abs(net) });
+    plans.push({ position: p, rows: closing, whole: false, orderSide: net > 0 ? "sell" : "buy", orderQty: Math.abs(net), timeStopPairs });
   }
   return plans;
 }
@@ -233,10 +244,24 @@ export async function runRealEodClose(): Promise<RealEodCloseSummary> {
 
   const positions = await alpacaFetch<AlpacaEodPosition[]>("/v2/positions");
   const openRows = (await db()`
-    SELECT id, symbol, pair_key, side, qty::float8 AS qty, entry_price::float8 AS entry_price
+    SELECT id, symbol, pair_key, side, qty::float8 AS qty, entry_price::float8 AS entry_price, entry_time
     FROM real_positions WHERE status = 'open'
   `) as unknown as RealEodOpenRow[];
-  const toClose = decideRealEodCloses(positions, openRows);
+
+  // Stop a tempo del pairs: coppie COMPLETE (due gambe) aperte da almeno MAX_HOLD_SESSIONS sedute. Un errore del
+  // calendario non deve impedire le altre chiusure EOD: in quel caso nessuna coppia scade oggi, riprova al prossimo tick.
+  let expiredPairs = new Set<string>();
+  try {
+    const byKey = new Map<string, RealEodOpenRow[]>();
+    for (const r of openRows) if (r.pair_key && r.entry_time) byKey.set(r.pair_key, [...(byKey.get(r.pair_key) ?? []), r]);
+    const infos: PairHoldInfo[] = [...byKey.entries()]
+      .filter(([, legs]) => legs.length >= 2)
+      .map(([pairKey, legs]) => ({ pairKey, entryDate: legs.map((l) => sessionDateOf(l.entry_time!)).sort()[0] }));
+    expiredPairs = await findExpiredPairs(infos, new Date().toISOString().slice(0, 10));
+  } catch {
+    expiredPairs = new Set();
+  }
+  const toClose = decideRealEodCloses(positions, openRows, expiredPairs);
 
   const results = await Promise.allSettled(toClose.map((plan) => closeAndRecord(plan)));
   const closed = results.filter((r) => r.status === "fulfilled").length;

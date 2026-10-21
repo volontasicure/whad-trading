@@ -10,6 +10,7 @@ import { runRealEodClose, finalizeTodaySession } from "../../server/realEod.js";
 import { runConsistencyIfDue } from "../../server/consistencyRunner.js";
 import { runDailyReviewIfDue } from "../../server/dailyReview.js";
 import { runTrendIfDue } from "../../server/trendRunner.js";
+import { findExpiredPairs, sessionDateOf, type PairHoldInfo } from "../../server/pairsTimeStop.js";
 import { STRATEGY_ID as TREND_STRATEGY_ID } from "../../server/trendEtf.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
@@ -509,6 +510,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 1/10/2026". decidePairsEodCloses resta definita in server/pairsTrading.ts per
     // riferimento, non più chiamata qui.
     let eodClosedCount = 0;
+    let labTimeStopCount = 0;
     if (nearClose) {
       const stillOpenIds = new Set([...vwapExits, ...orbExits].map((e) => e.position.id));
       for (const e of pairsExits) for (const id of e.legIds) stillOpenIds.add(id);
@@ -524,6 +526,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       eodClosedCount = singleCloses.length;
+
+      // Stop a tempo del pairs (server/pairsTimeStop.ts): una coppia aperta da almeno MAX_HOLD_SESSIONS sedute si chiude
+      // (entrambe le gambe) a fine seduta. Un errore qui non deve toccare nient'altro: riprova al tick successivo.
+      try {
+        const legsByKey = new Map<string, LabPositionRow[]>();
+        for (const r of remainingRows) {
+          if (r.strategy_id !== PAIRS_STRATEGY_ID || !r.pair_key) continue;
+          legsByKey.set(r.pair_key, [...(legsByKey.get(r.pair_key) ?? []), r]);
+        }
+        const infos: PairHoldInfo[] = [...legsByKey.entries()]
+          .filter(([, legs]) => legs.length >= 2)
+          .map(([pairKey, legs]) => ({ pairKey, entryDate: legs.map((l) => sessionDateOf(l.entry_time)).sort()[0] }));
+        const expired = await findExpiredPairs(infos, tradingDate);
+        for (const key of expired) {
+          const legs = legsByKey.get(key)!;
+          if (!legs.every((l) => prices[l.symbol] != null)) continue; // senza prezzo per entrambe: mai una gamba sola
+          for (const leg of legs) {
+            const price = prices[leg.symbol];
+            const dir = leg.side === "LONG" ? 1 : -1;
+            const pnl = Math.round(leg.qty * (price - leg.entry_price) * dir);
+            await db()`UPDATE lab_positions SET status='closed', exit_price=${price}, exit_time=${now.toISOString()}, realized_pnl=${pnl}, exit_reason='max_hold_days' WHERE id=${leg.id}`;
+          }
+          labTimeStopCount++;
+        }
+      } catch (err) {
+        console.error("stop a tempo pairs (lab) fallito, riprovo al tick successivo:", (err as Error).message);
+      }
     }
 
     // --- Chiusura EOD reale (conto Alpaca), a ridosso della chiusura — percorso primario dal
@@ -555,6 +584,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // — un problema qui non deve mai impedire di salvare il tick dei lab — ma un errore reale
     // (es. Alpaca irraggiungibile a metà invio ordini) resta comunque visibile in tick_log,
     // non silenziato.
+    // Righe reali aperte da passare all'esecuzione. Se la chiusura EOD reale qui sopra ha appena chiuso delle posizioni
+    // (singole, gambe orfane, coppie scadute per lo stop a tempo), la lettura di inizio tick è vecchia: le uscite
+    // decise su righe già chiuse manderebbero un secondo ordine opposto sul broker (stesso schema della doppia
+    // chiusura di BA del 30/9). Si rilegge quindi dal database prima di decidere le uscite.
+    let realRowsForExec = realOpenRows;
+    if (nearClose) {
+      try {
+        realRowsForExec = (await db()`
+          SELECT id, strategy_id, symbol, side, qty::float8 AS qty, entry_price::float8 AS entry_price, entry_time,
+                 pair_key, stop_price::float8 AS stop_price, target_price::float8 AS target_price
+          FROM real_positions WHERE status = 'open'
+        `) as unknown as RealPositionRow[];
+      } catch {
+        realRowsForExec = realOpenRows;
+      }
+    }
     let realNote = "reale: non tentata";
     try {
       const sessionBarVolumes: Record<string, number[]> = {};
@@ -574,7 +619,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         pairStats,
         pairStatsByKey,
         stoppedPairsToday: new Set(stoppedPairsToday),
-        openRows: realOpenRows,
+        openRows: realRowsForExec,
       });
       realNote = realResult.skipped
         ? `reale: saltata (${realResult.reason})`
@@ -583,7 +628,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       realNote = `reale: errore (${(err as Error).message})`;
     }
 
-    const note = `vwap: ${vwapExits.length} chiuse/${entriesSummary.vwap} aperte · orb: ${orbExits.length} chiuse/${entriesSummary.orb} aperte · pairs: ${pairsExits.length} chiuse/${entriesSummary.pairs} aperte${nearClose ? ` · EOD: ${eodClosedCount} chiuse` : ""}${realEodNote} · ${realNote}`;
+    const note = `vwap: ${vwapExits.length} chiuse/${entriesSummary.vwap} aperte · orb: ${orbExits.length} chiuse/${entriesSummary.orb} aperte · pairs: ${pairsExits.length} chiuse/${entriesSummary.pairs} aperte${nearClose ? ` · EOD: ${eodClosedCount} chiuse${labTimeStopCount > 0 ? `, ${labTimeStopCount} coppie a tempo` : ""}` : ""}${realEodNote} · ${realNote}`;
     await db()`INSERT INTO tick_log (market_open, note) VALUES (true, ${note})`;
 
     // --- Controllo di coerenza reale ↔ lab (dal 6/10/2026, server/consistencyRunner.ts). Dopo la

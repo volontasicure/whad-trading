@@ -17,6 +17,7 @@ import { fetchMarketSession } from "../server/marketHours.js";
 import { UNIVERSE_SYMBOLS as BASE_UNIVERSE_SYMBOLS } from "../server/universe.js";
 import { EXTRA_UNIVERSE_SECTORS, EXTRA_UNIVERSE_SYMBOLS } from "../server/universeExtra.js";
 import { SECTORS } from "../server/pairsTrading.js";
+import { MAX_HOLD_SESSIONS } from "../server/pairsTimeStop.js";
 import { LAB_COST_PCT_PER_SIDE } from "../server/costs.js";
 
 // EXP_EXTRA_UNIVERSE=1 allarga l'universo da 40 a 80 titoli (server/universeExtra.ts) — solo per
@@ -141,8 +142,12 @@ if (EXP_EXTRA_UNIVERSE) console.log(`UNIVERSO ESTESO: ${UNIVERSE_SYMBOLS.length}
 // settimane (0 rientri su 327 letture negli ultimi 5 giorni per entrambe), mai raggiungendo
 // lo stop (3,5) né il target (0,3) — senza più una rete EOD (rimossa l'1/10), questo tipo di
 // posizione oggi può restare aperta indefinitamente. 0/non impostato = nessun limite (comportamento attuale).
-const EXP_PAIRS_MAX_HOLD_DAYS = process.env.EXP_PAIRS_MAX_HOLD_DAYS ? Number(process.env.EXP_PAIRS_MAX_HOLD_DAYS) : 0;
-if (EXP_PAIRS_MAX_HOLD_DAYS > 0) console.log(`EXP_PAIRS_MAX_HOLD_DAYS=${EXP_PAIRS_MAX_HOLD_DAYS}`);
+// DAL 21/10/2026 il default è MAX_HOLD_SESSIONS (40) = lo stop a tempo IN PRODUZIONE (server/pairsTimeStop.ts): il
+// backtest rigioca la configurazione di produzione. EXP_PAIRS_MAX_HOLD_DAYS=0 lo disattiva (comportamento
+// precedente, utile per confronti), un altro numero lo cambia. I vecchi risultati in cache (%TEMP%/trader/runs)
+// sono stati prodotti SENZA stop a tempo.
+const EXP_PAIRS_MAX_HOLD_DAYS = process.env.EXP_PAIRS_MAX_HOLD_DAYS !== undefined ? Number(process.env.EXP_PAIRS_MAX_HOLD_DAYS) : MAX_HOLD_SESSIONS;
+console.log(`Stop a tempo pairs: ${EXP_PAIRS_MAX_HOLD_DAYS > 0 ? EXP_PAIRS_MAX_HOLD_DAYS + " sedute" : "disattivato"}`);
 // SCARTATA l'1/10/2026: peggiora il P&L pairs su ENTRAMBE le finestre a ogni valore testato
 // (3/5/7 giorni) rispetto al baseline senza limite (+2.376/+2.725) — 685/1.516, 628/502,
 // 85/1.701. Non overfitting (buono su una, cattivo sull'altra): rigetto netto su entrambe a
