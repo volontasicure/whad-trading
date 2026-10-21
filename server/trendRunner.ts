@@ -146,7 +146,26 @@ async function loadNetRealized(): Promise<number> {
 
 /** Esegue il ribilanciamento se dovuto. Restituisce una nota breve per la risposta del tick. Non lancia mai. */
 export async function runTrendIfDue(ctx: { now: Date; tradingDate: string; startedAtMs: number }): Promise<string> {
-  if (Date.now() - ctx.startedAtMs > SKIP_IF_TICK_SLOWER_THAN_MS) return "trend: saltato (tick già lento)";
+  const note = await decideAndRun(ctx);
+  // Visibilità: l'esito di ogni tentativo (tranne il "non dovuto" dei tick normali) resta in lab_state, perché la
+  // risposta del tick non è registrata da nessuna parte. Best-effort.
+  if (note !== "trend: non dovuto") {
+    try {
+      await db()`
+        INSERT INTO lab_state (strategy_id, trading_date, key, value, updated_at)
+        VALUES (${STRATEGY_ID}, ${ctx.tradingDate}, 'last_run', ${JSON.stringify({ at: ctx.now.toISOString(), note })}::jsonb, now())
+        ON CONFLICT (strategy_id, trading_date, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+      `;
+    } catch {
+      /* best-effort */
+    }
+  }
+  return note;
+}
+
+async function decideAndRun(ctx: { now: Date; tradingDate: string; startedAtMs: number }): Promise<string> {
+  const elapsed = Date.now() - ctx.startedAtMs;
+  if (elapsed > SKIP_IF_TICK_SLOWER_THAN_MS) return `trend: saltato (tick già lento: ${Math.round(elapsed / 100) / 10}s)`;
   try {
     const last = await loadLastRebalance();
     if (!isRebalanceDue(last?.month ?? null, ctx.tradingDate)) return "trend: non dovuto";
