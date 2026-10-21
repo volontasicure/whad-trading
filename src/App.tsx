@@ -4,6 +4,7 @@ import { ConfirmBanner } from "./components/ConfirmBanner";
 import { Sidebar } from "./components/Sidebar";
 import { AppStateProvider } from "./context/AppState";
 import { LabView } from "./views/LabView";
+import { TrendView } from "./views/TrendView";
 import { StrategyView } from "./views/StrategyView";
 import { DebriefView } from "./views/DebriefView";
 import { LiveView } from "./views/LiveView";
@@ -31,6 +32,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Navigate to="/lab" replace />} />
             <Route path="/lab" element={<LabView />} />
+            <Route path="/trend" element={<TrendView />} />
             <Route path="/strategie" element={<StrategyView />} />
             <Route path="/strategie/:id" element={<StrategyView />} />
             <Route path="/debriefing" element={<DebriefView />} />

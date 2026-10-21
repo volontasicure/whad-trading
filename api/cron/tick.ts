@@ -9,6 +9,8 @@ import { runRealExecution, type RealPositionRow } from "../../server/realExecuti
 import { runRealEodClose, finalizeTodaySession } from "../../server/realEod.js";
 import { runConsistencyIfDue } from "../../server/consistencyRunner.js";
 import { runDailyReviewIfDue } from "../../server/dailyReview.js";
+import { runTrendIfDue } from "../../server/trendRunner.js";
+import { STRATEGY_ID as TREND_STRATEGY_ID } from "../../server/trendEtf.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
   STRATEGY_ID as ORB_STRATEGY_ID,
@@ -513,7 +515,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const remainingRows = openRows.filter((r) => !stillOpenIds.has(r.id));
 
       const singleRows: LabOpenRow[] = remainingRows
-        .filter((r) => !r.pair_key)
+        // Il LAB D (trend ETF, server/trendEtf.ts) tiene le posizioni per settimane: mai chiuse dalla regola EOD delle singole.
+        .filter((r) => !r.pair_key && r.strategy_id !== TREND_STRATEGY_ID)
         .map((r) => ({ id: r.id, symbol: r.symbol, side: r.side, qty: r.qty, entryPrice: r.entry_price }));
       const singleCloses = decideLabEodCloses(singleRows, prices);
       for (const c of singleCloses) {
@@ -594,7 +597,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       consistencyNote = `controllo: errore (${(err as Error).message})`;
     }
 
-    res.status(200).json({ marketOpen: true, nearClose, note, consistency: consistencyNote, entriesSummary, eodClosedCount });
+    // --- LAB D, trend ETF (server/trendRunner.ts): ribilanciamento mensile, solo lab. Dopo tutto il resto, mai un'eccezione verso l'esterno.
+    let trendNote = "trend: non eseguito";
+    try {
+      trendNote = await runTrendIfDue({ now, tradingDate, startedAtMs });
+    } catch (err) {
+      trendNote = `trend: errore (${(err as Error).message})`;
+    }
+
+    res.status(200).json({ marketOpen: true, nearClose, note, consistency: consistencyNote, trend: trendNote, entriesSummary, eodClosedCount });
   } catch (err) {
     res.status(502).json({ error: (err as Error).message });
   }

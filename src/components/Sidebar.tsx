@@ -4,6 +4,7 @@ import { BROKERS } from "../data/mockData";
 
 const NAV_ITEMS = [
   { to: "/lab", label: "Laboratorio" },
+  { to: "/trend", label: "Trend ETF" },
   { to: "/strategie", label: "Strategie" },
   { to: "/debriefing", label: "Debriefing" },
   { to: "/reale", label: "Portafoglio reale" },
