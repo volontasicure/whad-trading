@@ -128,6 +128,7 @@ export const STRATEGIES: Strategy[] = [
       { label: "Titoli max in portafoglio", value: `6 / ${MARKET.length}`, hint: "solo le rotture più ampie" },
     ],
     backtest: BACKTEST_RESULTS.orb,
+    retiredOn: "2026-10-22",
   },
   {
     id: "pairs",
@@ -166,6 +167,7 @@ export const STRATEGIES: Strategy[] = [
       { label: "Titoli max in portafoglio", value: `8 / ${MARKET.length}`, hint: "le estensioni più ampie dell'universo" },
     ],
     backtest: BACKTEST_RESULTS.vwap_reversion,
+    retiredOn: "2026-10-22",
   },
 ];
 

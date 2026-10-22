@@ -70,6 +70,11 @@ export function LabView() {
                         {s.code}
                       </div>
                       <StatusBadge status={status} title={statusTitle} />
+                      {s.retiredOn && (
+                        <div className="mono" title="Nessun nuovo ingresso: bocciata dal backtest di produzione su 10 anni" style={{ fontSize: 8.5, letterSpacing: "0.08em", padding: "2px 5px", borderRadius: 4, whiteSpace: "nowrap", background: "var(--red-tint)", color: "var(--red-ink)" }}>
+                          SPENTA DAL {s.retiredOn.split("-").reverse().join("/")}
+                        </div>
+                      )}
                     </div>
                     <div style={{ fontSize: 16, fontWeight: 500, letterSpacing: "-0.01em", lineHeight: 1.25 }}>{s.name}</div>
                     <div style={{ fontSize: 11.5, color: "var(--text-secondary-2)", lineHeight: 1.45 }}>{s.logic}</div>

@@ -51,6 +51,8 @@ export interface Strategy {
   params: StrategyParam[];
   /** deve coincidere col valore mostrato nei params */
   maxPositions: number;
+  /** Data (YYYY-MM-DD) da cui la strategia è spenta anche nel lab: nessun nuovo ingresso (server/retiredStrategies.ts). */
+  retiredOn?: string;
   backtest: {
     net: number;
     sharpe: number;

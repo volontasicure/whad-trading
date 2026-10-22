@@ -31,6 +31,7 @@ export function StrategyView() {
               onClick={() => navigate(`/strategie/${s.id}`)}
             >
               {s.code} · {s.shortName}
+              {s.retiredOn ? " (spenta)" : ""}
             </div>
           ))}
         </div>

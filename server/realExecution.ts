@@ -20,6 +20,7 @@
 import { alpacaFetch, requireCredentials } from "./alpaca.js";
 import { db } from "./db.js";
 import { computeEligibility, computeWeights } from "./strategyAllocation.js";
+import { isRetired } from "./retiredStrategies.js";
 import { sizeByConviction, type SizingCandidate } from "./realSizing.js";
 import { findOrphanLegIds, occupiedSymbols } from "./realSymbols.js";
 import { missingFrom, saveSkippedSignals, type SkipRecord } from "./skippedSignals.js";
@@ -524,7 +525,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         }
       }
     } else {
-      if (weights[VWAP_STRATEGY_ID] > 0) {
+      if (weights[VWAP_STRATEGY_ID] > 0 && !isRetired(VWAP_STRATEGY_ID)) { // spenta dal 22/10/2026: doppia sicurezza oltre a REAL_CAPITAL_STRATEGIES
         const vwapCapital = capital * weights[VWAP_STRATEGY_ID];
         const stillOpen = new Set(vwapOpen.filter((p) => !vwapExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
         const freeSlots = VWAP_MAX_POSITIONS - stillOpen.size;
@@ -566,7 +567,7 @@ export async function runRealExecution(ctx: RealExecutionContext): Promise<RealE
         }
       }
 
-      if (weights[ORB_STRATEGY_ID] > 0) {
+      if (weights[ORB_STRATEGY_ID] > 0 && !isRetired(ORB_STRATEGY_ID)) { // spenta dal 22/10/2026
         const orbCapital = capital * weights[ORB_STRATEGY_ID];
         const stillOpen = new Set(orbOpenReconciled.filter((p) => !orbExits.some((e) => e.position.id === p.id)).map((p) => p.symbol));
         const freeSlots = ORB_MAX_POSITIONS - stillOpen.size;

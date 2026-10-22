@@ -12,6 +12,7 @@ import { runDailyReviewIfDue } from "../../server/dailyReview.js";
 import { runTrendIfDue } from "../../server/trendRunner.js";
 import { findExpiredPairs, sessionDateOf, type PairHoldInfo } from "../../server/pairsTimeStop.js";
 import { ETF_LAB_STRATEGY_IDS } from "../../server/trendEtf.js";
+import { isRetired } from "../../server/retiredStrategies.js";
 import {
   MAX_POSITIONS as ORB_MAX_POSITIONS,
   STRATEGY_ID as ORB_STRATEGY_ID,
@@ -455,7 +456,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // CLAUDE.md "Prossimi passi" #9 — backtest con segnale misto, non generalizza fuori
       // campione). Riattivare aggiungendo `, vwapTrend` qui e nella chiamata gemella in
       // server/realExecution.ts.
-      const vwapEntries = decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpen, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpen.size);
+      // ORB e VWAP spenti anche nel lab dal 22/10/2026 (server/retiredStrategies.ts): nessun nuovo ingresso.
+      const vwapEntries = isRetired(VWAP_STRATEGY_ID) ? [] : decideVwapEntries(UNIVERSE_SYMBOLS, vwapStillOpen, vwapSnapshots, vwapBars, VWAP_MAX_POSITIONS - vwapStillOpen.size);
       for (const e of vwapEntries) {
         await db()`INSERT INTO lab_positions (strategy_id, symbol, side, qty, entry_price, entry_time, status) VALUES (${VWAP_STRATEGY_ID}, ${e.symbol}, ${e.side}, ${e.qty}, ${e.entryPrice}, ${now.toISOString()}, 'open')`;
       }
@@ -472,7 +474,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const avgVol = bars.reduce((s, b) => s + b.v, 0) / bars.length;
         orbInputs[symbol] = { price, openingRange: range, atrPct: atr, avgBarVolume: avgVol, latestBarVolume: bars[bars.length - 1].v };
       }
-      const orbEntries = decideOrbEntries(UNIVERSE_SYMBOLS, orbStillOpenSymbols, orbInputs, ORB_MAX_POSITIONS - orbStillOpenSymbols.size);
+      const orbEntries = isRetired(ORB_STRATEGY_ID) ? [] : decideOrbEntries(UNIVERSE_SYMBOLS, orbStillOpenSymbols, orbInputs, ORB_MAX_POSITIONS - orbStillOpenSymbols.size);
       for (const e of orbEntries) {
         await db()`
           INSERT INTO lab_positions (strategy_id, symbol, side, qty, entry_price, entry_time, status, stop_price, target_price)
