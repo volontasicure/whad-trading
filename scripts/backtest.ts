@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { neon } from "@neondatabase/serverless";
 import { alpacaFetch, alpacaDataFetch } from "../server/alpaca.js";
-import { fetchMarketSession } from "../server/marketHours.js";
+import { etWallClockToUtcIso, fetchMarketSession, type MarketSession } from "../server/marketHours.js";
 import { UNIVERSE_SYMBOLS as BASE_UNIVERSE_SYMBOLS } from "../server/universe.js";
 import { EXTRA_UNIVERSE_SECTORS, EXTRA_UNIVERSE_SYMBOLS } from "../server/universeExtra.js";
 import { SECTORS } from "../server/pairsTrading.js";
@@ -369,6 +369,15 @@ interface AlpacaIntradayBarRaw {
 }
 interface AlpacaCalendarEntry {
   date: string;
+  open: string;
+  close: string;
+}
+
+/** Orari di sessione già letti dal calendario in fetchTradingDays: evita una chiamata a /v2/calendar per ogni seduta
+ *  rigiocata (con run di migliaia di sedute si arriva al limite di richieste di Alpaca). Stessa conversione di marketHours. */
+const sessionByDay = new Map<string, MarketSession>();
+async function sessionFor(day: string): Promise<MarketSession | null> {
+  return sessionByDay.get(day) ?? fetchMarketSession(day);
 }
 
 /** beforeDateIso, se dato, ancora la finestra PRIMA di quella data (esclusa) invece che su oggi — per test fuori campione. */
@@ -378,6 +387,7 @@ async function fetchTradingDays(count: number, beforeDateIso?: string): Promise<
   const calFactor = process.env.BACKTEST_CAL_FACTOR ? Number(process.env.BACKTEST_CAL_FACTOR) : 1;
   const start = new Date(new Date(end).getTime() - Math.ceil(count * calFactor + 15) * 86_400_000).toISOString().slice(0, 10);
   const cal = await alpacaFetch<AlpacaCalendarEntry[]>(`/v2/calendar?start=${start}&end=${end}`);
+  for (const c of cal) sessionByDay.set(c.date, { openUtc: etWallClockToUtcIso(c.date, c.open), closeUtc: etWallClockToUtcIso(c.date, c.close) });
   const days = cal.map((c) => c.date);
   const filtered = beforeDateIso ? days.filter((d) => d < beforeDateIso) : days;
   return filtered.slice(-count);
@@ -423,7 +433,7 @@ async function fetchSessionBars(startUtc: string, endUtc: string): Promise<Recor
 
 async function fetchSessionBarsUncached(startUtc: string, endUtc: string): Promise<Record<string, AlpacaIntradayBarRaw[]>> {
   const merged = await fetchPaginated<AlpacaIntradayBarRaw>(
-    `/v2/stocks/bars?symbols=${encodeURIComponent(UNIVERSE_SYMBOLS.join(","))}&timeframe=5Min&limit=3000&feed=iex&adjustment=split,spin-off&sort=asc&start=${encodeURIComponent(startUtc)}&end=${encodeURIComponent(endUtc)}`
+    `/v2/stocks/bars?symbols=${encodeURIComponent(UNIVERSE_SYMBOLS.join(","))}&timeframe=5Min&limit=3000&feed=${process.env.BACKTEST_INTRADAY_FEED ?? "iex"}&adjustment=split,spin-off&sort=asc&start=${encodeURIComponent(startUtc)}&end=${encodeURIComponent(endUtc)}`
   );
   const out: Record<string, AlpacaIntradayBarRaw[]> = {};
   for (const s of UNIVERSE_SYMBOLS) out[s] = merged[s] ?? [];
@@ -561,7 +571,7 @@ async function run() {
     const realizedBefore = { orb: totals.orb.realized, vwap: totals.vwap.realized, pairs: totals.pairs.realized };
     const turnoverBefore = { orb: totals.orb.turnover, vwap: totals.vwap.turnover, pairs: totals.pairs.turnover };
     const tradesBefore = { orb: tradeStats.orb.n, vwap: tradeStats.vwap.n, pairs: tradeStats.pairs.n };
-    const session = await fetchMarketSession(day);
+    const session = await sessionFor(day);
     if (!session) {
       flag(`[${day}] nessuna sessione nel calendario Alpaca (inatteso per un trading day)`);
       continue;
