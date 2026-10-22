@@ -65,8 +65,8 @@ export function LabView() {
               <div key={s.id} className="card" style={{ padding: "16px 16px 14px", display: "flex", flexDirection: "column", gap: 14 }}>
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 100 }}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <div className="mono" style={{ fontSize: 10, letterSpacing: "0.13em", color: "var(--text-faint)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <div className="mono" style={{ fontSize: 10, letterSpacing: "0.13em", color: "var(--text-faint)", whiteSpace: "nowrap" }}>
                         {s.code}
                       </div>
                       <StatusBadge status={status} title={statusTitle} />
