@@ -219,6 +219,16 @@ function buildCore(cost: number) {
 }
 const C1 = buildCore(COST);
 const C2 = buildCore(COST * 2);
+// Riferimento per il collaudo dei lab (scripts/test-trend-etf.ts): le serie con i parametri walk-forward del 2026
+// (server/trendEtf.ts, CORE_PARAMS) tenute fisse su tutto il periodo.
+writeFileSync(
+  path.join(T, "core_ref.json"),
+  JSON.stringify({
+    dates: dates.slice(START),
+    trend: C1.tf[TF_GRID.findIndex((g) => g.sma === 150 && g.vt === 0.12)].slice(START),
+    rotation: C1.rm[RM_GRID.findIndex((g) => g.label === "mix top5")].slice(START),
+  })
+);
 const mix = (...parts: [number[], number][]) => new Array(N).fill(0).map((_, t) => parts.reduce((s, [r, w]) => s + w * r[t], 0));
 
 const series: Record<string, number[]> = {};
